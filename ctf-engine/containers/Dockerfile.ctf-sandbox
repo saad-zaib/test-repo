@@ -1,0 +1,32 @@
+# CTF Sandbox — Pre-built Docker Image
+#
+# Build once: docker build -t ctf-sandbox:latest -f containers/Dockerfile.ctf-sandbox .
+# This saves ~30-60 seconds per lab generation vs installing at runtime.
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System tools
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+    curl wget netcat-traditional nmap \
+    python3 python3-pip \
+    nodejs npm \
+    docker.io \
+    git jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker Compose v2
+RUN curl -sL https://github.com/docker/compose/releases/download/v2.24.6/docker-compose-linux-x86_64 \
+    -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose && \
+    mkdir -p /usr/local/lib/docker/cli-plugins && \
+    cp /usr/local/bin/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+
+# Python packages commonly needed for exploits
+RUN pip3 install --no-cache-dir requests httpx pymongo pyjwt 2>/dev/null || true
+
+WORKDIR /workspace
+
+CMD ["sleep", "infinity"]

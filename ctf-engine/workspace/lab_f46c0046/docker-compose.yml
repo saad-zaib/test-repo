@@ -1,0 +1,20 @@
+version: '3'
+services:
+  db:
+    image: mongo:latest
+    container_name: mongo_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+  app:
+    build: .
+    container_name: app
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+    environment:
+      MONGODB_URI: mongodb://db:27017/ctf
+volumes:
+  mongo-data:
