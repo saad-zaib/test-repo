@@ -1,21 +1,21 @@
 """
 llm/client.py
 
-Universal LLM client powered by LiteLLM.
-Supports Ollama, OpenAI, Anthropic, and any other LiteLLM-supported provider.
+Universal LLM client.
+- Ollama: Direct HTTP to /api/chat (bypasses LiteLLM's broken timeout handling)
+- Cloud (OpenAI, Anthropic, etc.): Uses LiteLLM as before
 
 The startup probe auto-detects the provider and uses the appropriate health check.
-Generation uses LiteLLM's unified completion API with retry logic.
 """
 
 import json
 import logging
 import re
+import sys
 import time
 from typing import Optional
 
-import litellm
-from litellm import completion, acompletion
+import httpx
 
 from config import (
     LLM_MODEL,
@@ -28,11 +28,6 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# LiteLLM settings
-litellm.drop_params = True        # Drop unsupported params silently
-litellm.modify_params = True      # Let LiteLLM adapt params per provider
-litellm.set_verbose = False       # Quiet unless debugging
-
 
 # ── Request Stats Tracking ────────────────────────────────────────────────────
 
@@ -42,84 +37,60 @@ class RequestStats:
     def __init__(self):
         self.total_input_tokens = 0
         self.total_output_tokens = 0
-        self.total_cost = 0.0
         self.total_requests = 0
         self.total_errors = 0
 
-    def record(self, response):
-        """Record usage from a LiteLLM response."""
+    def record(self, input_tokens: int = 0, output_tokens: int = 0):
         self.total_requests += 1
-        try:
-            usage = getattr(response, "usage", None)
-            if usage:
-                self.total_input_tokens += getattr(usage, "prompt_tokens", 0) or 0
-                self.total_output_tokens += getattr(usage, "completion_tokens", 0) or 0
-            try:
-                from litellm import completion_cost
-                self.total_cost += completion_cost(response) or 0.0
-            except Exception:
-                pass
-        except Exception:
-            pass
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
 
     def summary(self) -> dict:
         return {
             "requests": self.total_requests,
             "input_tokens": self.total_input_tokens,
             "output_tokens": self.total_output_tokens,
-            "cost_usd": round(self.total_cost, 4),
             "errors": self.total_errors,
         }
 
 
-# Global stats tracker
 _stats = RequestStats()
 
 
 def get_stats() -> dict:
-    """Return cumulative LLM usage stats."""
     return _stats.summary()
 
 
 # ── Provider Detection ────────────────────────────────────────────────────────
 
 def _is_ollama() -> bool:
-    """Check if we're using an Ollama-based model."""
     return any(p in LLM_MODEL.lower() for p in ["ollama", "ollama_chat"])
 
 
-def _is_cloud() -> bool:
-    """Check if we're using a cloud provider (OpenAI, Anthropic, etc.)."""
-    return any(p in LLM_MODEL.lower() for p in [
-        "openai/", "anthropic/", "azure/", "gpt-", "claude",
-    ])
+def _ollama_model_name() -> str:
+    """Strip ollama/ or ollama_chat/ prefix to get raw model name."""
+    if "/" in LLM_MODEL:
+        return LLM_MODEL.split("/", 1)[-1]
+    return LLM_MODEL
 
 
 # ── Startup Health Check ─────────────────────────────────────────────────────
 
 def probe_llm() -> bool:
-    """
-    Fast connectivity check.
-    For Ollama: uses /api/tags endpoint.
-    For cloud: sends a minimal completion to verify API key.
-    Returns True if the model is available.
-    """
     if _is_ollama():
         return _probe_ollama()
     return _probe_cloud()
 
 
 def _probe_ollama() -> bool:
-    """Check Ollama server is up and model is loaded."""
-    import httpx
+    """Check Ollama server is up and model is available."""
     try:
-        # Extract base URL (strip ollama_chat/ prefix from model)
         base = LLM_API_BASE.rstrip("/")
         resp = httpx.get(f"{base}/api/tags", timeout=5)
         if resp.status_code != 200:
             return False
 
-        model_name = LLM_MODEL.split("/", 1)[-1] if "/" in LLM_MODEL else LLM_MODEL
+        model_name = _ollama_model_name()
         models = [m["name"] for m in resp.json().get("models", [])]
 
         if not any(model_name in m for m in models):
@@ -137,14 +108,14 @@ def _probe_ollama() -> bool:
 
 
 def _probe_cloud() -> bool:
-    """Check cloud provider connectivity with a tiny completion."""
+    """Check cloud provider with a tiny completion."""
     try:
+        from litellm import completion
         resp = completion(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": "ping"}],
             max_tokens=5,
             api_key=LLM_API_KEY or None,
-            api_base=LLM_API_BASE if LLM_API_BASE and not _is_cloud() else None,
             timeout=10,
         )
         logger.info(f"✅ LLM ready: {LLM_MODEL}")
@@ -152,6 +123,140 @@ def _probe_cloud() -> bool:
     except Exception as e:
         logger.warning(f"LLM probe failed: {e}")
         return False
+
+
+# ── Direct Ollama Call ────────────────────────────────────────────────────────
+
+def _call_ollama(
+    messages: list,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """
+    Call Ollama's /api/chat with streaming enabled.
+    Waits infinitely for the model to think (no timeouts).
+    Tokens are printed instantly to the console.
+    """
+    base = LLM_API_BASE.rstrip("/")
+    url = f"{base}/api/chat"
+    model_name = _ollama_model_name()
+
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "stream": True,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+
+    logger.info(
+        f"Ollama request: model={model_name}, msgs={len(messages)} "
+        f"(Infinite Timeout — waiting for first token...)"
+    )
+
+    print(f"\n{'─'*70}", flush=True)
+    print(f"🤖 QWEN STREAMING [{model_name}]:", flush=True)
+    print(f"{'─'*70}", flush=True)
+
+    full_text = []
+    in_tokens = 0
+    out_tokens = 0
+
+    # No timeout on the connection to allow for infinite "thinking" time
+    timeout = httpx.Timeout(None)
+    
+    with httpx.Client(timeout=timeout) as client:
+        # We MUST use iter_bytes() to avoid buffering issues waiting for newlines
+        with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            
+            buffer = ""
+            for byte_chunk in resp.iter_bytes():
+                if not byte_chunk:
+                    continue
+                    
+                buffer += byte_chunk.decode("utf-8")
+                
+                # Try to parse complete JSON objects out of the buffer
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                        
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        # If a single line is cut off (rare for Ollama, but possible), put it back
+                        buffer = line + "\n" + buffer
+                        break
+
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        sys.stdout.write(token)
+                        sys.stdout.flush()
+                        full_text.append(token)
+
+                    if chunk.get("done"):
+                        in_tokens  = chunk.get("prompt_eval_count", 0)
+                        out_tokens = chunk.get("eval_count", 0)
+                        eval_dur   = chunk.get("eval_duration", 0) / 1e9
+                        total_dur  = chunk.get("total_duration", 0) / 1e9
+                        tok_rate   = out_tokens / max(eval_dur, 0.001)
+                        print(f"\n{'─'*70}", flush=True)
+                        print(
+                            f"✅ Done — in: {in_tokens} tok | out: {out_tokens} tok | "
+                            f"{tok_rate:.1f} tok/s | total: {total_dur:.1f}s",
+                            flush=True,
+                        )
+                        print(f"{'─'*70}\n", flush=True)
+
+    _stats.record(input_tokens=in_tokens, output_tokens=out_tokens)
+    text = "".join(full_text).strip()
+    return text
+
+
+
+
+# ── Cloud Call via LiteLLM ────────────────────────────────────────────────────
+
+def _call_cloud(
+    messages: list,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Call cloud providers via LiteLLM."""
+    from litellm import completion
+
+    kwargs = {
+        "model": LLM_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "timeout": LLM_TIMEOUT,
+    }
+
+    if LLM_API_KEY:
+        kwargs["api_key"] = LLM_API_KEY
+
+    resp = completion(**kwargs)
+
+    # Track usage
+    usage = getattr(resp, "usage", None)
+    if usage:
+        _stats.record(
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        )
+    else:
+        _stats.record()
+
+    text = resp.choices[0].message.content.strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    return text
 
 
 # ── Main LLM Call ─────────────────────────────────────────────────────────────
@@ -165,7 +270,7 @@ def call_llm(
     conversation: Optional[list] = None,
 ) -> str:
     """
-    Call the LLM via LiteLLM's unified API.
+    Call the LLM. Routes to Ollama (direct HTTP) or cloud (LiteLLM).
 
     Args:
         system_prompt: Sets the LLM identity/role.
@@ -193,19 +298,8 @@ def call_llm(
             {"role": "user", "content": user_prompt},
         ]
 
-    # Build completion args
-    kwargs = {
-        "model": LLM_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "timeout": LLM_TIMEOUT,
-    }
-
-    if LLM_API_KEY:
-        kwargs["api_key"] = LLM_API_KEY
-    if LLM_API_BASE and _is_ollama():
-        kwargs["api_base"] = LLM_API_BASE
+    # Pick the right backend
+    backend_fn = _call_ollama if _is_ollama() else _call_cloud
 
     # Retry with exponential backoff
     max_retries = 3
@@ -213,15 +307,7 @@ def call_llm(
 
     for attempt in range(max_retries + 1):
         try:
-            resp = completion(**kwargs)
-            _stats.record(resp)
-
-            text = resp.choices[0].message.content.strip()
-
-            # Strip think blocks (Qwen3, DeepSeek, etc.)
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-            return text
+            return backend_fn(messages, temperature, max_tokens)
 
         except Exception as e:
             last_error = e
@@ -252,7 +338,7 @@ async def call_llm_async(
     max_tokens: int = LLM_MAX_TOKENS,
     json_mode: bool = False,
 ) -> str:
-    """Async version of call_llm for use in async agent loops."""
+    """Async version of call_llm."""
     import asyncio
 
     if json_mode:
@@ -266,40 +352,51 @@ async def call_llm_async(
         {"role": "user", "content": user_prompt},
     ]
 
-    kwargs = {
-        "model": LLM_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "timeout": LLM_TIMEOUT,
-    }
+    if _is_ollama():
+        # Run synchronous Ollama call in a thread pool
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, _call_ollama, messages, temperature, max_tokens,
+        )
+    else:
+        from litellm import acompletion
 
-    if LLM_API_KEY:
-        kwargs["api_key"] = LLM_API_KEY
-    if LLM_API_BASE and _is_ollama():
-        kwargs["api_base"] = LLM_API_BASE
+        kwargs = {
+            "model": LLM_MODEL,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": LLM_TIMEOUT,
+        }
+        if LLM_API_KEY:
+            kwargs["api_key"] = LLM_API_KEY
 
-    max_retries = 3
-    last_error = None
+        max_retries = 3
+        last_error = None
 
-    for attempt in range(max_retries + 1):
-        try:
-            resp = await acompletion(**kwargs)
-            _stats.record(resp)
+        for attempt in range(max_retries + 1):
+            try:
+                resp = await acompletion(**kwargs)
+                usage = getattr(resp, "usage", None)
+                if usage:
+                    _stats.record(
+                        input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                        output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                    )
+                else:
+                    _stats.record()
+                text = resp.choices[0].message.content.strip()
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+                return text
+            except Exception as e:
+                last_error = e
+                _stats.total_errors += 1
+                if attempt < max_retries:
+                    wait = min(10, 2 ** (attempt + 1))
+                    logger.warning(f"Async LLM call failed (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(wait)
 
-            text = resp.choices[0].message.content.strip()
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-            return text
-
-        except Exception as e:
-            last_error = e
-            _stats.total_errors += 1
-            if attempt < max_retries:
-                wait = min(10, 2 ** (attempt + 1))
-                logger.warning(f"Async LLM call failed (attempt {attempt + 1}): {e}")
-                await asyncio.sleep(wait)
-
-    raise RuntimeError(f"Async LLM failed after {max_retries + 1} attempts: {last_error}")
+        raise RuntimeError(f"Async LLM failed after {max_retries + 1} attempts: {last_error}")
 
 
 # ── JSON Helper ───────────────────────────────────────────────────────────────
@@ -328,7 +425,6 @@ def call_llm_for_json(
             )
         # Try to extract JSON from surrounding text
         if not text.startswith("{") and not text.startswith("["):
-            # Find first { or [
             for i, c in enumerate(text):
                 if c in "{[":
                     text = text[i:]

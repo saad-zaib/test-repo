@@ -31,8 +31,8 @@ LLM_API_BASE = os.getenv(
 # API key — only needed for cloud providers; Ollama doesn't need one
 LLM_API_KEY = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 
-# Timeout per LLM call (seconds) — higher for larger models
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", os.getenv("QWEN_TIMEOUT", "300")))
+# Timeout per LLM call (seconds) — 1800 = 30 minutes
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", os.getenv("QWEN_TIMEOUT", "1800")))
 
 # Generation parameters
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
@@ -49,7 +49,7 @@ QWEN_TIMEOUT = LLM_TIMEOUT
 # ENGINE SERVER
 # ─────────────────────────────────────────────
 ENGINE_HOST = os.getenv("ENGINE_HOST", "0.0.0.0")
-ENGINE_PORT = int(os.getenv("ENGINE_PORT", "9000"))
+ENGINE_PORT = int(os.getenv("ENGINE_PORT", "9001"))
 
 # ─────────────────────────────────────────────
 # WORKSPACE & DOCKER

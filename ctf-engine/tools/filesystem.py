@@ -97,3 +97,38 @@ def delete_file(path: str) -> str:
             return f"ERROR: Path does not exist: {resolved}"
     except Exception as e:
         return f"ERROR deleting {path}: {e}"
+
+
+def patch_file(path: str, find: str, replace: str) -> str:
+    """Replace a specific substring in a file WITHOUT rewriting the whole file.
+    Use this for targeted fixes — e.g. changing one dependency version or fixing one line.
+    The 'find' string must appear exactly once in the file.
+    """
+    resolved = _resolve(path)
+    try:
+        content = resolved.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return f"ERROR: File not found: {resolved}"
+    except Exception as e:
+        return f"ERROR reading {path}: {e}"
+
+    count = content.count(find)
+    if count == 0:
+        # Show a preview of the file to help the LLM find the right string
+        preview = content[:500]
+        return (
+            f"ERROR: The 'find' string was NOT found in {path}.\n"
+            f"File preview (first 500 chars):\n{preview}"
+        )
+    if count > 1:
+        return (
+            f"ERROR: The 'find' string appears {count} times in {path}. "
+            f"Use a more specific string to match exactly once."
+        )
+
+    new_content = content.replace(find, replace, 1)
+    try:
+        resolved.write_text(new_content, encoding="utf-8")
+        return f"OK: Patched {path} — replaced {len(find)} chars with {len(replace)} chars"
+    except Exception as e:
+        return f"ERROR writing {path}: {e}"

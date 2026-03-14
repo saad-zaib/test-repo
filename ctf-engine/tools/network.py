@@ -4,14 +4,27 @@ tools/network.py — Network & Health Tools.
 Uses the `requests` library (already in the environment) for HTTP calls.
 """
 
+import html as html_module
 import time
 import socket
 import logging
+import re
+
 import requests
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 10  # seconds
+
+
+def _strip_html(text: str) -> str:
+    """Convert HTML error pages to readable plain text."""
+    text = re.sub(r'<br\s*/?>', '\n', text)
+    text = re.sub(r'&nbsp;', ' ', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html_module.unescape(text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def http_request(
@@ -34,7 +47,9 @@ def http_request(
             timeout=_DEFAULT_TIMEOUT,
             allow_redirects=True,
         )
-        body = response.text[:1000]  # cap raw body
+        body = response.text[:1000]
+        if '<html' in body.lower() or '<br' in body.lower():
+            body = _strip_html(body)
         return f"HTTP {response.status_code}\nHeaders: {dict(response.headers)}\nBody:\n{body}"
     except requests.exceptions.ConnectionError:
         return f"ERROR: Could not connect to {url}"
@@ -44,8 +59,8 @@ def http_request(
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def wait_for_service(url: str = "http://localhost:3000", timeout: int = 30) -> str:
-    """Poll a URL until it returns HTTP 200, or until the timeout expires."""
+def wait_for_service(url: str = "http://localhost:3000", timeout: int = 240) -> str:
+    """Poll a URL until it returns HTTP 200, or until the timeout expires. Default is 240s (4 minutes). Use this default for slow systems."""
     deadline = time.time() + timeout
     interval = 2
     attempt = 0

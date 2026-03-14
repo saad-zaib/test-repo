@@ -16,6 +16,7 @@ Memory management:
   - Strix-style iteration warnings at 80%/97%
 """
 
+import inspect
 import json
 import logging
 import re
@@ -29,8 +30,10 @@ from skills import load_skill
 from sandbox import DockerSandbox
 from tools import (
     execute_tool, parse_tool_call, truncate_output, get_tool_descriptions,
+    TOOL_REGISTRY,
 )
 from tools.filesystem import set_workspace as fs_set_workspace
+from tools.docker_tools import set_workspace as docker_set_workspace
 from tools.memory import set_spec as memory_set_spec
 from tools.reporting import set_workspace as reporting_set_workspace
 
@@ -59,6 +62,7 @@ PHASE_TRANSITIONS = {
     # Detect phase transitions from tool usage
     "web_search":      AgentPhase.RESEARCH,
     "write_file":      AgentPhase.BUILD,
+    "patch_file":      AgentPhase.BUILD,
     "docker_up":       AgentPhase.DEPLOY,
     "docker_build":    AgentPhase.DEPLOY,
     "docker_logs":     AgentPhase.DEPLOY,
@@ -85,10 +89,13 @@ class Checkpoint:
         self.port       = spec.get("assigned_port", 3000)  # Dynamic port
         self.flag_found = False     # Flag confirmed in exploit output
         self.errors     = []        # Error history for debugging
+        self.file_contents: dict[str, str] = {}  # Store file contents for white-box exploit context
 
-    def record_file(self, path: str):
+    def record_file(self, path: str, content: str = ""):
         if path not in self.built:
             self.built.append(path)
+        if content:
+            self.file_contents[path] = content
 
     def record_deployment(self, port: int = None):
         self.deployed = True
@@ -143,6 +150,71 @@ def manage_context(messages: list, checkpoint: Checkpoint) -> list:
     return pinned + recent
 
 
+
+def _build_exploit_brief(checkpoint: Checkpoint, spec: dict) -> str:
+    """Build a rich exploit-phase context with the actual source code
+    so the AI can do WHITE-BOX exploitation instead of blind guessing."""
+    port = checkpoint.port
+    lines = [
+        f"[EXPLOIT PHASE — WHITE-BOX]",
+        f"Lab is running on http://localhost:{port}",
+        f"Vulnerability: {spec.get('vuln_type')}",
+        f"Target flag: {spec.get('flag')}",
+        "",
+    ]
+
+    # Inject source code from BUILD phase so the AI knows the schema
+    if checkpoint.file_contents:
+        lines.append("=== SOURCE CODE (you wrote these files) ===")
+        # Prioritize app code files, limit total size
+        priority_exts = ('.js', '.py', '.ts', '.php', '.rb', '.go')
+        code_files = {}
+        other_files = {}
+        for path, content in checkpoint.file_contents.items():
+            if any(path.endswith(ext) for ext in priority_exts):
+                code_files[path] = content
+            else:
+                other_files[path] = content
+
+        total_chars = 0
+        max_chars = 4000  # Keep within context budget
+
+        for path, content in code_files.items():
+            if total_chars + len(content) > max_chars:
+                lines.append(f"\n--- {path} (truncated) ---")
+                remaining = max_chars - total_chars
+                lines.append(content[:remaining])
+                total_chars = max_chars
+                break
+            lines.append(f"\n--- {path} ---")
+            lines.append(content)
+            total_chars += len(content)
+
+        # Add Dockerfile/compose if space allows
+        for path, content in other_files.items():
+            if total_chars + len(content) > max_chars:
+                break
+            lines.append(f"\n--- {path} ---")
+            lines.append(content)
+            total_chars += len(content)
+
+        lines.append("=== END SOURCE CODE ===")
+        lines.append("")
+
+    lines.extend([
+        "INSTRUCTIONS:",
+        "You have the full source code above. Use it to craft a PRECISE exploit.",
+        "1. Count the EXACT number of columns in the vulnerable SELECT query.",
+        "2. Your UNION SELECT must have the SAME number of columns.",
+        "3. Place the flag column in the position that maps to the property",
+        "   the application code reads (check the response line like `user.flag`).",
+        "4. Use send_exploit / http_request to retrieve the flag.",
+        "5. Then call verify_flag, save_exploit_script, and DONE.",
+    ])
+
+    return "\n".join(lines)
+
+
 def compact_for_phase(
     system_prompt: str,
     checkpoint: Checkpoint,
@@ -157,19 +229,15 @@ def compact_for_phase(
     phase_briefs = {
         AgentPhase.DEPLOY: (
             f"[DEPLOY PHASE]\n"
-            f"All files have been written. Deploy them now.\n"
-            f"Files: {', '.join(checkpoint.built)}\n"
-            f"Run docker_up to start the containers, then wait_for_service to confirm.\n"
-            f"If deployment fails, read docker_logs and fix the specific file."
+            f"All files have been written. Deploy them now using EXACT tool signatures:\n"
+            f"  docker_up(compose_file=\".\")  ← starts containers via docker compose\n"
+            f"  wait_for_service(url=\"http://localhost:{checkpoint.spec.get('assigned_port', 3000)}\", timeout=30)\n"
+            f"  docker_logs(container=\"<name>\", tail=50)  ← if startup fails\n"
+            f"  docker_build(context_path=\".\")  ← only if docker_up build step fails\n"
+            f"Files ready: {', '.join(checkpoint.built)}\n"
+            f"If docker_up fails: check docker_logs, fix the file, then docker_up again."
         ),
-        AgentPhase.EXPLOIT: (
-            f"[EXPLOIT PHASE]\n"
-            f"Lab is running on http://localhost:{checkpoint.port}\n"
-            f"Vulnerability: {spec.get('vuln_type')}\n"
-            f"Target flag: {spec.get('flag')}\n"
-            f"Write an exploit using send_exploit / http_request to retrieve the flag.\n"
-            f"Then call verify_flag, save_exploit_script, and DONE."
-        ),
+        AgentPhase.EXPLOIT: _build_exploit_brief(checkpoint, spec),
         AgentPhase.FINALIZE: (
             f"[FINALIZE PHASE]\n"
             f"Flag captured! Save the exploit script and finalize the lab.\n"
@@ -205,6 +273,7 @@ class ReActAgent:
 
         # Wire workspace into tool modules
         fs_set_workspace(workspace)
+        docker_set_workspace(workspace)  # Fix: docker paths resolve to lab workspace
         reporting_set_workspace(workspace)
         memory_set_spec(spec)
 
@@ -236,6 +305,14 @@ class ReActAgent:
         messages = self._initial_messages()
         last_phase = AgentPhase.RESEARCH
         no_tool_count = 0  # Consecutive responses without a tool call
+
+        # Loop-breaker: track repeated failures of the same tool
+        last_tool_name: str | None = None
+        last_tool_error: str | None = None
+        repeated_error_count = 0
+
+        # Fix D: Semantic loop detector — track tool call patterns
+        tool_history: list[str] = []
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             pct = (iteration / MAX_ITERATIONS) * 100
@@ -364,6 +441,54 @@ class ReActAgent:
             output = truncate_output(tool_name, raw_output)
             logger.info(f"[Agent] Output ({len(output)} chars): {output[:300]}")
 
+            # ── Loop-breaker: detect repeated identical failures ────────────
+            is_error = output.startswith("ERROR")
+            if is_error and tool_name == last_tool_name and output[:120] == (last_tool_error or "")[:120]:
+                repeated_error_count += 1
+                if repeated_error_count >= 3:
+                    fn = TOOL_REGISTRY.get(tool_name)
+                    sig = str(inspect.signature(fn)) if fn else "(unknown)"
+                    correction = (
+                        f"You have called '{tool_name}' {repeated_error_count} times with the same error.\n"
+                        f"STOP guessing. The EXACT signature is: {tool_name}{sig}\n"
+                        f"Error was: {output[:200]}\n"
+                        f"Use a DIFFERENT tool or fix the root cause before retrying."
+                    )
+                    messages.append({"role": "user", "content": correction})
+                    repeated_error_count = 0  # Reset after intervention
+            else:
+                if is_error:
+                    last_tool_error = output
+                    repeated_error_count = 1 if tool_name == last_tool_name else 0
+                else:
+                    repeated_error_count = 0
+                    last_tool_error = None
+            last_tool_name = tool_name
+
+            # ── Fix D: Semantic loop detector ─────────────────────────────
+            tool_history.append(tool_name)
+            if len(tool_history) > 16:
+                tool_history = tool_history[-16:]
+
+            if len(tool_history) >= 8:
+                recent = tool_history[-8:]
+                writes = sum(1 for t in recent if t in ("write_file", "patch_file"))
+                deploys = sum(1 for t in recent if t in ("docker_up", "docker_build"))
+                if writes >= 3 and deploys >= 3:
+                    logger.warning("[Agent] ⚠️ Rewrite-rebuild loop detected!")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "⚠️ LOOP DETECTED: You have been alternating between rewriting files "
+                            "and running docker commands for several iterations. STOP rewriting files.\n"
+                            "Instead: 1) Run docker_down() first, 2) Then docker_up(compose_file=\".\"), "
+                            "3) If build fails, check the EXACT stacktrace/error and fix ONLY the broken file "
+                            "using patch_file(path, find, replace).\n"
+                            "Do NOT rewrite docker-compose.yml repeatedly — the version format is NOT the problem."
+                        ),
+                    })
+                    tool_history.clear()
+
             # ── Update checkpoint & phase ──────────────────────────────────
             self._update_checkpoint(tool_name, args, output)
             self._detect_phase(tool_name, output)
@@ -395,10 +520,11 @@ class ReActAgent:
 
     def _update_checkpoint(self, tool_name: str, args: dict, output: str):
         """Update the milestone checkpoint from tool results."""
-        if tool_name == "write_file":
+        if tool_name in ("write_file", "patch_file"):
             path = args.get("path", args.get("file_path", ""))
+            content = args.get("content", "")
             if path:
-                self.checkpoint.record_file(path)
+                self.checkpoint.record_file(path, content)
 
         elif tool_name in ("docker_up", "docker_build"):
             if "error" not in output.lower() or "running" in output.lower():
