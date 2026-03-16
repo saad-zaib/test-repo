@@ -378,16 +378,12 @@ class ReActAgent:
             if not response:
                 logger.warning("[Agent] LLM returned empty response — nudging")
                 no_tool_count += 1
-                if no_tool_count >= 3:
-                    messages.append({
-                        "role": "user",
-                        "content": "You have not made a tool call in 3 turns. Output a <tool> block NOW.",
-                    })
-                else:
-                    messages.append({
-                        "role": "user",
-                        "content": "No response received. Please output a <tool> block.",
-                    })
+                nudge_msg = (
+                    "Output ONE tool call only. No reasoning, no explanation. Just:\n"
+                    "<tool>tool_name</tool>\n"
+                    "<args>{\"key\": \"value\"}</args>"
+                ) if no_tool_count >= 2 else "No response received. Please output a <tool> block."
+                messages.append({"role": "user", "content": nudge_msg})
                 continue
 
             # Strip think blocks for history but keep for parsing
@@ -501,8 +497,21 @@ class ReActAgent:
 
             # ── Feed observation back ──────────────────────────────────────
             messages.append({"role": "user", "content": f"[Observation]\n{output}"})
+            
+            # If wait_for_service timed out, force a docker_logs call
+            if tool_name == "wait_for_service" and "TIMEOUT" in output:
+                # Container name follows docker compose naming: {lab_id}-app-1
+                container_name = f"{self.lab_id}-app-1"
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"The service timed out — the container is likely crashing at startup. "
+                        f"Call docker_logs NOW with container=\"{container_name}\" to see the crash reason. "
+                        f"Do NOT rewrite any files until you have read the logs."
+                    ),
+                })
 
-        # Max iterations reached
+            # Max iterations reached
         logger.error(f"[Agent] Max iterations ({MAX_ITERATIONS}) reached.")
         return {
             "status": "failed",
