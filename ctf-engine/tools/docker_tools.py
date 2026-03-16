@@ -43,6 +43,9 @@ def _get_client() -> docker_sdk.DockerClient:
 
 
 def _run_compose(cmd: list[str], cwd: str) -> str:
+    resolved_cwd = _resolve(cwd)          # ADD THIS LINE
+    if resolved_cwd.is_file():
+        resolved_cwd = resolved_cwd.parent
     # Try v2 first, fall back to v1
     for binary in [["docker", "compose"], ["docker-compose"]]:
         try:
