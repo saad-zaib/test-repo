@@ -498,10 +498,14 @@ class ReActAgent:
             # ── Feed observation back ──────────────────────────────────────
             messages.append({"role": "user", "content": f"[Observation]\n{output}"})
             
-            # If wait_for_service timed out, force a docker_logs call
             if tool_name == "wait_for_service" and "TIMEOUT" in output:
-                # Container name follows docker compose naming: {lab_id}-app-1
-                container_name = f"{self.lab_id}-app-1"
+                # Find the actual container name instead of guessing
+                import subprocess
+                ps = subprocess.run(
+                    ["docker", "ps", "-a", "--filter", f"name={self.lab_id}", "--format", "{{.Names}}"],
+                    capture_output=True, text=True
+                )
+                container_name = ps.stdout.strip().split("\n")[0] if ps.stdout.strip() else f"{self.lab_id}-app-1"
                 messages.append({
                     "role": "user",
                     "content": (
@@ -572,3 +576,4 @@ class ReActAgent:
                 if detected != current:
                     logger.info(f"[Agent] Phase auto-detected: {current} → {detected}")
                 self.checkpoint.phase = detected
+

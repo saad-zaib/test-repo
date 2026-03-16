@@ -33,6 +33,9 @@ CRITICAL MINDSET:
 TOOL CALL FORMAT — output exactly ONE tool call per response:
 <tool>tool_name</tool>
 <args>{"key": "value"}</args>
+NEVER use JSON format like {"action": "tool_name", ...}
+NEVER use {"name": "tool_name", "arguments": {...}}
+NEVER output multiple tool calls at once — ONE at a time only.
 
 Wait for the observation before deciding the next step.
 

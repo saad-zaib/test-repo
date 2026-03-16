@@ -200,65 +200,130 @@ def _repair_json(raw: str) -> str:
 
     if in_string:
         result.append('"')
-        
+
     repaired = ''.join(result).strip()
-    
+
     # Very simplistic auto-closing of dicts/lists for truncated output
     open_curly = repaired.count('{') - repaired.count('\\{')
     close_curly = repaired.count('}') - repaired.count('\\}')
     if open_curly > close_curly:
         repaired += '}' * (open_curly - close_curly)
-        
+
     return repaired
 
 
 def parse_tool_call(text: str) -> tuple[str | None, dict]:
+
+    TOOL_ALIASES = {
+        "websearch":          "web_search",
+        "web_search_tool":    "web_search",
+        "search":             "web_search",
+        "run_docker_compose": "docker_up",
+        "docker_compose_up":  "docker_up",
+        "docker_compose":     "docker_up",
+        "http":               "http_request",
+        "http_get":           "http_request",
+        "http_post":          "http_request",
+        "request":            "http_request",
+        "bash":               "run_bash",
+        "shell":              "run_bash",
+        "execute":            "run_bash",
+        "exec":               "run_bash",
+        "create_file":        "write_file",
+        "file_write":         "write_file",
+    }
+
     tool_match = re.search(r"<tool>(.*?)</tool>", text, re.DOTALL | re.IGNORECASE)
     args_match  = re.search(r"<args>\s*(\{.*?(?:</args>|$))", text, re.DOTALL | re.IGNORECASE)
+
+    # ── Fallback 1: <tool>{"tool": "name", ...}</tool> — JSON inside tool tags ──
+    if tool_match:
+        inner = tool_match.group(1).strip()
+        if inner.startswith("{"):
+            try:
+                obj = json.loads(inner)
+                t = obj.pop("tool", obj.pop("name", None))
+                if t:
+                    t = TOOL_ALIASES.get(t, t)
+                    logger.info(f"[Tools] Parsed JSON-inside-tool-tags format: {t}")
+                    return t, obj
+            except json.JSONDecodeError:
+                pass
+
+    # ── Fallback 2: {"action": "tool_name", ...} — action key format ──
+    if not tool_match:
+        action_match = re.search(r'^\s*\{.*?"action"\s*:\s*"([^"]+)"', text, re.DOTALL)
+        if action_match:
+            tool_name = action_match.group(1).strip()
+            tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+            try:
+                obj = json.loads(text.strip())
+                obj.pop("action", None)
+                logger.info(f"[Tools] Parsed action-key format: {tool_name}")
+                return tool_name, obj
+            except json.JSONDecodeError:
+                pass
+
+    # ── Fallback 3: {"name": "tool_name", "arguments": {...}} format ──
+    if not tool_match:
+        name_match = re.search(r'"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*?\})', text, re.DOTALL)
+        if name_match:
+            tool_name = name_match.group(1).strip()
+            tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+            try:
+                args = json.loads(name_match.group(2))
+                logger.info(f"[Tools] Parsed name/arguments format: {tool_name}")
+                return tool_name, args
+            except json.JSONDecodeError:
+                pass
+
+    # ── Fallback 4: function_call(arg="value") syntax ──
+    if not tool_match:
+        func_match = re.match(r'^(\w+)\((.*?)\)\s*$', text.strip(), re.DOTALL)
+        if func_match:
+            tool_name = func_match.group(1).strip()
+            tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+            try:
+                args = dict(re.findall(r'(\w+)\s*=\s*["\']([^"\']*)["\']', func_match.group(2)))
+                logger.info(f"[Tools] Parsed function-call syntax: {tool_name}")
+                return tool_name, args
+            except Exception:
+                pass
 
     if not tool_match:
         return None, {}
 
     tool_name = tool_match.group(1).strip().split('\n')[0].split('{')[0].strip()
-
-    TOOL_ALIASES = {
-        "websearch": "web_search",
-        "web_search_tool": "web_search",
-        "search": "web_search",
-        "run_docker_compose": "docker_up",
-        "docker_compose_up": "docker_up",
-        "docker_compose": "docker_up",
-        "http": "http_request",
-        "http_get": "http_request",
-        "http_post": "http_request",
-        "request": "http_request",
-        "bash": "run_bash",
-        "shell": "run_bash",
-        "execute": "run_bash",
-        "exec": "run_bash",
-        "create_file": "write_file",
-        "file_write": "write_file",
-    }
     tool_name = TOOL_ALIASES.get(tool_name, tool_name)
 
     args = {}
-    if args_match:
-        raw_json = args_match.group(1).strip()
-        if raw_json.endswith("</args>"):
-            raw_json = raw_json[:-7].strip()
 
+    # ── Fallback 5: XML-style args <key>value</key> inside <args> ──
+    if args_match:
+        raw_args = args_match.group(1).strip()
+        if raw_args.endswith("</args>"):
+            raw_args = raw_args[:-7].strip()
+
+        # Try standard JSON first
         try:
-            args = json.loads(raw_json)
+            args = json.loads(raw_args)
         except json.JSONDecodeError:
+            # Try JSON repair
             try:
-                repaired = _repair_json(raw_json)
+                repaired = _repair_json(raw_args)
                 args = json.loads(repaired)
                 logger.info(f"[Tools] JSON repaired for tool '{tool_name}'")
             except json.JSONDecodeError:
-                logger.warning(
-                    f"[Tools] Failed to parse args JSON for tool '{tool_name}' "
-                    f"(even after repair). Raw: {raw_json[:200]}"
-                )
+                # Try XML-style args: <key>value</key>
+                xml_pairs = re.findall(r'<(\w+)>(.*?)</\1>', raw_args, re.DOTALL)
+                if xml_pairs:
+                    args = {k: v.strip() for k, v in xml_pairs}
+                    logger.info(f"[Tools] Parsed XML-style args for tool '{tool_name}'")
+                else:
+                    logger.warning(
+                        f"[Tools] Failed to parse args for tool '{tool_name}'. "
+                        f"Raw: {raw_args[:200]}"
+                    )
 
     return tool_name, args
 
@@ -311,14 +376,14 @@ def truncate_output(tool_name: str, output: str) -> str:
     - ERROR outputs: show up to ERROR_LIMIT chars so the LLM gets full diagnostics.
     - OK outputs: head+tail truncation with per-tool budgets to protect context window.
     """
-    ERROR_LIMIT = 2000  # Errors need full context for diagnosis
+    ERROR_LIMIT = 4000  # Increased — errors need full context for diagnosis
 
     limits = {
         "read_file":        1500,
         "docker_logs":      1000,
-        "docker_up":        1200,
+        "docker_up":        3000,  # Increased — build errors are deep in the output
         "docker_down":      400,
-        "docker_build":     1200,
+        "docker_build":     3000,  # Increased — same reason
         "run_bash":         800,
         "npm_install":      600,
         "pip_install":      400,
