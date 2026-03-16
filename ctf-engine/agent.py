@@ -75,6 +75,14 @@ PHASE_TRANSITIONS = {
     "save_lab_metadata":   AgentPhase.FINALIZE,
 }
 
+PHASE_GOALS = {
+    "research":  "Use web_search ONCE to confirm exploit technique, then immediately start writing files with write_file. Do NOT call web_search more than once.",
+    "build":     "Write all required files using write_file. Do NOT call web_search.",
+    "deploy":    "Run docker_up, then wait_for_service. If it fails, check docker_logs and fix the file.",
+    "exploit":   "Send the exploit payload using send_exploit or http_request. Capture the flag.",
+    "finalize":  "Call save_exploit_script then DONE.",
+}
+
 
 # ─── Checkpoint / Memory ────────────────────────────────────────────────────
 
@@ -128,27 +136,22 @@ class Checkpoint:
 # ─── Context Window Management ───────────────────────────────────────────────
 
 def manage_context(messages: list, checkpoint: Checkpoint) -> list:
-    """
-    Sliding window with pinned milestone injection.
-    Keeps: [system_prompt, checkpoint_summary, initial_goal] + last HISTORY_WINDOW messages.
-    """
     if len(messages) <= HISTORY_PIN + HISTORY_WINDOW:
-        # Still small enough to keep everything
-        # Update checkpoint message
         if len(messages) > 1:
             messages[1] = {"role": "user", "content": checkpoint.to_summary()}
+        # Update goal message to current phase
+        if len(messages) > 2:
+            messages[2] = {"role": "user", "content": PHASE_GOALS[checkpoint.phase]}
         return messages
 
     pinned  = messages[:HISTORY_PIN]
     rolling = messages[HISTORY_PIN:]
     recent  = rolling[-HISTORY_WINDOW:]
 
-    # Update the checkpoint message with latest state
-    if len(pinned) > 1:
-        pinned[1] = {"role": "user", "content": checkpoint.to_summary()}
+    pinned[1] = {"role": "user", "content": checkpoint.to_summary()}
+    pinned[2] = {"role": "user", "content": PHASE_GOALS[checkpoint.phase]}
 
     return pinned + recent
-
 
 
 def _build_exploit_brief(checkpoint: Checkpoint, spec: dict) -> str:
@@ -294,8 +297,7 @@ class ReActAgent:
                     f"Build a CTF lab for '{self.spec.get('vuln_type')}' "
                     f"({self.spec.get('difficulty', 'medium')} difficulty). "
                     f"The flag is: {self.flag}\n\n"
-                    f"Start by researching current exploit techniques with web_search, "
-                    f"then plan the file structure and begin writing code."
+                    f"{PHASE_GOALS['research']}"
                 ),
             },
         ]
@@ -342,7 +344,7 @@ class ReActAgent:
             # ── Phase transition: compact context ─────────────────────────
             current_phase = self.checkpoint.phase
             if current_phase != last_phase and current_phase in (
-                AgentPhase.DEPLOY, AgentPhase.EXPLOIT, AgentPhase.FINALIZE
+                AgentPhase.BUILD, AgentPhase.DEPLOY, AgentPhase.EXPLOIT, AgentPhase.FINALIZE
             ):
                 logger.info(f"[Agent] Phase transition: {last_phase} → {current_phase}")
                 messages = compact_for_phase(self.system_prompt, self.checkpoint, current_phase)

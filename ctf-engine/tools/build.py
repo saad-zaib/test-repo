@@ -20,21 +20,9 @@ def _run_in_sandbox(cmd: str, sandbox, timeout: int = 60) -> str:
 
 
 def run_bash(command: str, sandbox=None) -> str:
-    """Run any bash command. Prefer this for complex shell operations."""
-    if sandbox:
-        return _run_in_sandbox(command, sandbox)
-    # Fallback: run on host (for setup only, not inside lab)
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True,
-            text=True, timeout=60,
-        )
-        return (result.stdout + result.stderr).strip() or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "ERROR: Command timed out after 60s"
-    except Exception as e:
-        return f"ERROR: {e}"
-
+    if sandbox is None:
+        return "ERROR: run_bash requires a sandbox. Use write_file/docker_up instead."
+    return _run_in_sandbox(command, sandbox)
 
 def npm_install(packages: str, cwd: str = ".", sandbox=None) -> str:
     """Install npm package(s). packages can be a space-separated list."""

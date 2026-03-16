@@ -43,27 +43,23 @@ def _get_client() -> docker_sdk.DockerClient:
 
 
 def _run_compose(cmd: list[str], cwd: str) -> str:
-    """Run a docker-compose command and return combined stdout+stderr."""
-    resolved_cwd = _resolve(cwd)
-    # Fix B: If cwd resolved to a file (e.g. "docker-compose.yml"), use its parent dir
-    if resolved_cwd.is_file():
-        resolved_cwd = resolved_cwd.parent
-    try:
-        result = subprocess.run(
-            ["docker-compose"] + cmd,  # Fix A: use v1 standalone command
-            cwd=str(resolved_cwd),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        output = (result.stdout + result.stderr).strip()
-        if result.returncode != 0:
-            return f"ERROR: docker-compose failed with code {result.returncode}:\n{output}"
-        return output if output else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "ERROR: docker-compose timed out after 120s"
-    except FileNotFoundError:
-        return "ERROR: docker-compose not found in PATH"
+    # Try v2 first, fall back to v1
+    for binary in [["docker", "compose"], ["docker-compose"]]:
+        try:
+            result = subprocess.run(
+                binary + cmd,
+                cwd=str(resolved_cwd),
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0 and "unknown command" in result.stderr:
+                continue  # try next binary
+            output = (result.stdout + result.stderr).strip()
+            if result.returncode != 0:
+                return f"ERROR: docker compose failed:\n{output}"
+            return output or "(no output)"
+        except FileNotFoundError:
+            continue
+    return "ERROR: Neither 'docker compose' nor 'docker-compose' found in PATH"
 
 
 def docker_build(context_path: str = ".") -> str:

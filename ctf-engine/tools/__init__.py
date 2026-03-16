@@ -213,35 +213,43 @@ def _repair_json(raw: str) -> str:
 
 
 def parse_tool_call(text: str) -> tuple[str | None, dict]:
-    """
-    Extract tool name and args from LLM output.
-
-    Expected format:
-        <tool>tool_name</tool>
-        <args>{"key": "value"}</args>
-
-    Includes JSON repair for multiline content that LLMs often produce.
-    Returns (tool_name, args_dict) or (None, {}) if not found.
-    """
     tool_match = re.search(r"<tool>(.*?)</tool>", text, re.DOTALL | re.IGNORECASE)
-    # Match <args> even if </args> is cut off at the end of the text
     args_match  = re.search(r"<args>\s*(\{.*?(?:</args>|$))", text, re.DOTALL | re.IGNORECASE)
 
     if not tool_match:
         return None, {}
 
     tool_name = tool_match.group(1).strip()
+
+    TOOL_ALIASES = {
+        "websearch": "web_search",
+        "web_search_tool": "web_search",
+        "search": "web_search",
+        "run_docker_compose": "docker_up",
+        "docker_compose_up": "docker_up",
+        "docker_compose": "docker_up",
+        "http": "http_request",
+        "http_get": "http_request",
+        "http_post": "http_request",
+        "request": "http_request",
+        "bash": "run_bash",
+        "shell": "run_bash",
+        "execute": "run_bash",
+        "exec": "run_bash",
+        "create_file": "write_file",
+        "file_write": "write_file",
+    }
+    tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+
     args = {}
     if args_match:
         raw_json = args_match.group(1).strip()
         if raw_json.endswith("</args>"):
             raw_json = raw_json[:-7].strip()
 
-        # Attempt 1: parse as-is (fast path for well-formed JSON)
         try:
             args = json.loads(raw_json)
         except json.JSONDecodeError:
-            # Attempt 2: repair raw newlines/tabs inside string values / truncated JSON
             try:
                 repaired = _repair_json(raw_json)
                 args = json.loads(repaired)
@@ -263,7 +271,15 @@ def execute_tool(tool_name: str, args: dict, sandbox=None) -> str:
     - Silently strips unexpected kwargs to prevent TypeErrors from LLM hallucination.
     """
     if tool_name not in TOOL_REGISTRY:
-        return f"ERROR: Unknown tool '{tool_name}'. Available: {', '.join(ALL_TOOLS)}"
+        categorized = {
+            "files": ["read_file","write_file","patch_file","list_files","delete_file"],
+            "docker": ["docker_up","docker_down","docker_logs","docker_ps","docker_exec"],
+            "network": ["http_request","wait_for_service","send_exploit","verify_flag"],
+            "build": ["run_bash","npm_install","pip_install"],
+            "search": ["web_search"],
+        }
+        hint = "\n".join(f"  {k}: {', '.join(v)}" for k,v in categorized.items())
+        return f"ERROR: Unknown tool '{tool_name}'.\nAvailable tools:\n{hint}"
 
     fn = TOOL_REGISTRY[tool_name]
 

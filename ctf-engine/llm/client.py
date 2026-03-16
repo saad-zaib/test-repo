@@ -148,6 +148,7 @@ def _call_ollama(
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
+            "think": False,
         },
     }
 
@@ -215,8 +216,8 @@ def _call_ollama(
 
     _stats.record(input_tokens=in_tokens, output_tokens=out_tokens)
     text = "".join(full_text).strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     return text
-
 
 
 

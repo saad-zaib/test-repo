@@ -59,7 +59,7 @@ def http_request(
         return f"ERROR: {type(e).__name__}: {e}"
 
 
-def wait_for_service(url: str = "http://localhost:3000", timeout: int = 240) -> str:
+def wait_for_service(url: str = "http://localhost:3000", timeout: int = 30) -> str:
     """Poll a URL until it returns HTTP 200, or until the timeout expires. Default is 240s (4 minutes). Use this default for slow systems."""
     deadline = time.time() + timeout
     interval = 2

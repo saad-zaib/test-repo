@@ -81,7 +81,7 @@ class LabSpec(BaseModel):
     vuln_type: str           # e.g., "sqli_union", "xss_reflected", "cmdi", "ssrf"
     difficulty: str          # "easy", "medium", "hard"
     flag: str                # e.g., "CTF{your_flag_here}"
-    solution_payload: str    # the exact exploit payload
+    solution_payload: Optional[str] = None
 
     # Optional but recommended
     title: Optional[str] = None
