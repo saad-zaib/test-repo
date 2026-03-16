@@ -286,21 +286,25 @@ class ReActAgent:
         # Build system prompt via Jinja2
         self.system_prompt = render_system_prompt(spec, self.skill_content)
 
-    def _initial_messages(self) -> list:
-        """Build the initial conversation context."""
-        return [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user",   "content": self.checkpoint.to_summary()},
-            {
-                "role": "user",
-                "content": (
-                    f"Build a CTF lab for '{self.spec.get('vuln_type')}' "
-                    f"({self.spec.get('difficulty', 'medium')} difficulty). "
-                    f"The flag is: {self.flag}\n\n"
-                    f"{PHASE_GOALS['research']}"
-                ),
-            },
-        ]
+	def _initial_messages(self) -> list:
+            """Build the initial conversation context."""
+            research_goal = (
+                PHASE_GOALS['research'] if not self.skill_content
+                else "The skill blueprint above has all the info you need. Skip web_search and go directly to write_file."
+           )
+           return [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user",   "content": self.checkpoint.to_summary()},
+                {
+                     "role": "user",
+                     "content": (
+                         f"Build a CTF lab for '{self.spec.get('vuln_type')}' "
+                         f"({self.spec.get('difficulty', 'medium')} difficulty). "
+                         f"The flag is: {self.flag}\n\n"
+                         f"{research_goal}"
+                      ),
+                },
+          ]
 
     def run(self) -> dict:
         """Run the multi-phase ReAct loop until DONE or max iterations."""

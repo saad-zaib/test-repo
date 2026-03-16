@@ -219,7 +219,7 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
     if not tool_match:
         return None, {}
 
-    tool_name = tool_match.group(1).strip()
+    tool_name = tool_match.group(1).strip().split('\n')[0].split('{')[0].strip()
 
     TOOL_ALIASES = {
         "websearch": "web_search",
