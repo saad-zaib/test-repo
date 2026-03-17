@@ -26,11 +26,32 @@ from tools.register_lab import RegisterLabTool
 from llm.client import probe_llm
 
 # ── Logging setup ──
+import os
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+# Also write to a debug log file when debug is enabled
+if DEBUG_MODE:
+    file_handler = logging.FileHandler(
+        os.path.join(WORKSPACE_DIR, "ctf_engine_debug.log"), mode='a'
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+    
 logger = logging.getLogger(__name__)
+if DEBUG_MODE:
+    logger.info("🔍 DEBUG MODE ENABLED — verbose logging active, writing to ctf_engine_debug.log")
+
+# Suppress noisy HTTP library logs even in debug mode (they drown out useful output)
+for noisy_logger in ("httpcore", "httpx", "httpcore.connection", "httpcore.http11",
+                      "urllib3", "urllib3.connectionpool", "hpack"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 # ── In-memory job tracker ──
 # Key: job_id → Value: {"status": "pending/running/done/failed", "result": {...}}

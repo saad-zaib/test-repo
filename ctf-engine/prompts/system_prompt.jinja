@@ -77,21 +77,37 @@ ANTI-FIX RULES (things that ACCIDENTALLY fix the vulnerability — NEVER do thes
 
 <strategy>
 EXECUTION STRATEGY:
-1. First use web_search to research current exploit techniques for this vulnerability type
-2. Plan the application architecture (files, containers, database schema)
-3. Write all files using write_file (not heredocs in bash)
-4. Deploy with docker_up, verify with wait_for_service
-5. If deployment fails, read logs with docker_logs, fix the issue, redeploy
-6. Write a targeted exploit and run it with send_exploit
-7. Verify the flag with verify_flag
-8. Save the exploit script with save_exploit_script
-9. Call DONE only after the flag appears in tool output
+1. You ALREADY KNOW these vulnerabilities from your training — skip web_search for vulnerability research
+2. web_search is ONLY for: Docker image tags, npm package versions, or API documentation
+3. Write ALL required files: package.json, server.js/app.js, Dockerfile, docker-compose.yml
+4. Use KNOWN WORKING package versions — DO NOT use versions you're unsure about:
+   - better-sqlite3: ^9.0.0 (NOT ^8.x)
+   - express: ^4.18.2
+   - ejs: ^3.1.9
+   - mongoose: ^7.0.0
+   - node base image: node:18
+5. ALWAYS write docker-compose.yml BEFORE calling docker_up
+6. Deploy with docker_up(compose_file="."), verify with wait_for_service
+7. If deployment fails: read docker_logs, fix ONLY the broken line with patch_file, redeploy
+8. Do NOT rewrite entire files from scratch — use patch_file for targeted fixes
+9. Write a targeted exploit and run it with send_exploit or http_request
+10. Verify the flag with verify_flag
+11. Save the exploit script with save_exploit_script
+12. Call DONE only after the flag appears in tool output
 
 DEBUGGING RULES:
 - If docker_up fails: check docker_logs, fix the specific file, redeploy
+- If npm install fails: the ERROR message will show the exact package/version issue — fix that specific version
 - If the exploit doesn't capture the flag: check the vulnerability is actually present
 - If the service doesn't start: verify ports, dependencies, and database initialization
 - NEVER give up — iterate until the lab works end-to-end
+- NEVER rewrite all files when only one line needs fixing
+
+CONTEXT RECOVERY:
+- A persistent log of ALL your tool calls and outputs is saved to agent_log.txt
+- If you feel confused about what was done earlier, call: read_file("agent_log.txt")
+- This gives you the COMPLETE history from iteration 1 — nothing is ever lost
+- Use this when the conversation feels like it's missing context
 </strategy>
 
 {% if skill_content %}

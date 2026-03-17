@@ -182,5 +182,28 @@
         "web_service": 3000
       }
     }
+  },
+  "lab_90d55f67": {
+    "lab_id": "lab_90d55f67",
+    "user_id": "anonymous",
+    "session_token": "4815f7d1-6128-4e44-afbb-8d594b456d36",
+    "created_at": "2026-03-17T16:34:09.624896",
+    "expires_at": "2026-03-17T18:34:09.624896",
+    "service_urls": {
+      "app": "http://localhost:3000"
+    },
+    "par_time": 566.81,
+    "lab_dir": "workspace\\lab_90d55f67",
+    "status": "active",
+    "challenge": {
+      "title": null,
+      "description": null,
+      "category": "web",
+      "difficulty": "easy",
+      "flag": "CTF{test}",
+      "ports": {
+        "web_service": 3000
+      }
+    }
   }
 }

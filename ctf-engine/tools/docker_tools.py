@@ -86,8 +86,23 @@ def docker_build(context_path: str = ".") -> str:
         error_detail = str(e)
         if hasattr(e, 'build_log') and e.build_log:
             log_lines = [l.get('stream', '') for l in e.build_log if l.get('stream')]
-            tail = ''.join(log_lines[-15:])
-            error_detail += f"\n--- Build Log (last 15 lines) ---\n{tail}"
+
+            # Prioritize npm/pip error lines — these contain the real failure reason
+            # but often get buried under apt-get install output
+            error_keywords = ['npm error', 'npm ERR!', 'ERR!', 'ETARGET', 'ERESOLVE',
+                              'ModuleNotFoundError', 'No matching version',
+                              'not found in registry', 'ENOENT', 'pip error',
+                              'Could not find a version', 'error Command failed']
+            important_lines = [
+                l.strip() for l in log_lines
+                if any(kw.lower() in l.lower() for kw in error_keywords)
+            ]
+            
+            if important_lines:
+                error_detail += f"\n--- KEY ERRORS ---\n" + "\n".join(important_lines[:10])
+            
+            tail = ''.join(log_lines[-10:])
+            error_detail += f"\n--- Build Log (last 10 lines) ---\n{tail}"
         return f"ERROR: docker build failed: {error_detail}"
     except Exception as e:
         return f"ERROR: docker build failed: {e}"

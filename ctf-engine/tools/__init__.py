@@ -45,6 +45,7 @@ from tools.memory import (
 from tools.reporting import (
     save_lab_metadata, mark_lab_complete, save_exploit_script,
 )
+from tools.strix_exploit import run_strix_exploit
 
 # ── Registry: name → function ───────────────────────────────────────────────
 TOOL_REGISTRY: dict[str, Callable] = {
@@ -103,6 +104,9 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "save_lab_metadata":    save_lab_metadata,
     "mark_lab_complete":    mark_lab_complete,
     "save_exploit_script":  save_exploit_script,
+
+    # Strix Integration
+    "run_strix_exploit":    run_strix_exploit,
 }
 
 ALL_TOOLS = list(TOOL_REGISTRY.keys())
@@ -212,6 +216,147 @@ def _repair_json(raw: str) -> str:
     return repaired
 
 
+# ── Known function parameter names (position→name mapping) ──
+_TOOL_PARAM_NAMES: dict[str, list[str]] = {
+    "write_file":    ["path", "content"],
+    "read_file":     ["path"],
+    "delete_file":   ["path"],
+    "append_file":   ["path", "content"],
+    "patch_file":    ["path", "old_text", "new_text"],
+    "docker_up":     ["compose_file"],
+    "docker_down":   ["compose_file"],
+    "docker_build":  ["compose_file"],
+    "docker_logs":   ["service", "lines"],
+    "docker_exec":   ["container", "command"],
+    "http_request":  ["url", "method", "data", "headers"],
+    "wait_for_service": ["url", "timeout"],
+    "send_exploit":  ["url", "method", "data", "headers"],
+    "verify_flag":   ["flag"],
+    "npm_install":   ["packages"],
+    "pip_install":   ["packages"],
+    "run_bash":      ["command"],
+    "web_search":    ["query"],
+    "list_files":    ["path"],
+}
+
+
+def _parse_function_call_args(tool_name: str, raw: str) -> dict:
+    """
+    Parse function-call arguments like:
+      write_file(path="X", content="Y")
+      write_file(path="X", content=\\"\\"\\"multi\\nline\\"\\"\\")
+      write_file("X", "Y")              ← positional
+    
+    Returns a dict mapping param names to values.
+    """
+    raw = raw.strip()
+    if not raw:
+        return {}
+
+    # ── Tokenize: extract string values (handling triple-quotes) ──
+    tokens: list[tuple[str | None, str]] = []   # (key_or_None, value)
+    i = 0
+    n = len(raw)
+
+    while i < n:
+        # Skip whitespace and commas
+        while i < n and raw[i] in ' ,\t\r\n':
+            i += 1
+        if i >= n:
+            break
+
+        # Try to read keyword: key=
+        key = None
+        key_match = re.match(r'(\w+)\s*=\s*', raw[i:])
+        if key_match:
+            key = key_match.group(1)
+            i += key_match.end()
+            if i >= n:
+                break
+
+        # Read value (string or bare token)
+        if i < n and raw[i:i+3] in ('"""', "'''"):
+            # Triple-quoted string
+            quote = raw[i:i+3]
+            i += 3
+            end = raw.find(quote, i)
+            if end == -1:
+                value = raw[i:]  # unclosed — grab till end
+                i = n
+            else:
+                value = raw[i:end]
+                i = end + 3
+            tokens.append((key, value))
+        elif i < n and raw[i] in ('"', "'"):
+            # Single-quoted string — but handle escaped quotes
+            quote = raw[i]
+            i += 1
+            value_chars = []
+            while i < n:
+                if raw[i] == '\\' and i + 1 < n:
+                    value_chars.append(raw[i:i+2])
+                    i += 2
+                elif raw[i] == quote:
+                    i += 1
+                    break
+                else:
+                    value_chars.append(raw[i])
+                    i += 1
+            value = ''.join(value_chars)
+            # Process escape sequences
+            value = value.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'")
+            tokens.append((key, value))
+        elif i < n and raw[i] == '{':
+            # JSON object as argument value
+            depth = 0
+            start = i
+            while i < n:
+                if raw[i] == '{':
+                    depth += 1
+                elif raw[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                i += 1
+            try:
+                value = json.loads(raw[start:i])
+                tokens.append((key, value))
+            except json.JSONDecodeError:
+                tokens.append((key, raw[start:i]))
+        else:
+            # Bare word/number
+            m = re.match(r'[^\s,)]+', raw[i:])
+            if m:
+                tokens.append((key, m.group(0)))
+                i += m.end()
+            else:
+                i += 1
+
+    # ── Build args dict ──
+    args: dict = {}
+    positional_values: list[str] = []
+
+    for key, value in tokens:
+        if key:
+            args[key] = value
+        else:
+            positional_values.append(value)
+
+    # Map positional args to parameter names via known signature
+    if positional_values:
+        param_names = _TOOL_PARAM_NAMES.get(tool_name, [])
+        for idx, val in enumerate(positional_values):
+            if idx < len(param_names):
+                param_name = param_names[idx]
+                if param_name not in args:  # don't overwrite keyword args
+                    args[param_name] = val
+            # else: extra positional args silently dropped
+
+    logger.debug(f"[Tools] _parse_function_call_args('{tool_name}'): {list(args.keys())}")
+    return args
+
+
 def parse_tool_call(text: str) -> tuple[str | None, dict]:
 
     TOOL_ALIASES = {
@@ -233,8 +378,15 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
         "file_write":         "write_file",
     }
 
+    # Debug: log first 500 chars of response for debugging
+    logger.debug(f"[Tools] Parsing response ({len(text)} chars): {text[:500]}")
+
     tool_match = re.search(r"<tool>(.*?)</tool>", text, re.DOTALL | re.IGNORECASE)
-    args_match  = re.search(r"<args>\s*(\{.*?(?:</args>|$))", text, re.DOTALL | re.IGNORECASE)
+    # Match ANY content inside <args> tags — not just JSON (could be XML-style)
+    args_match = re.search(r"<args>\s*(.*?)\s*</args>", text, re.DOTALL | re.IGNORECASE)
+    if not args_match:
+        # Fallback: unclosed <args> tag — grab everything after it
+        args_match = re.search(r"<args>\s*(.*?)$", text, re.DOTALL | re.IGNORECASE)
 
     # ── Fallback 1: <tool>{"tool": "name", ...}</tool> — JSON inside tool tags ──
     if tool_match:
@@ -245,6 +397,15 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
                 t = obj.pop("tool", obj.pop("name", None))
                 if t:
                     t = TOOL_ALIASES.get(t, t)
+                    # Unwrap "arguments" or "params" key if present — Qwen often uses
+                    # {"name": "tool", "arguments": {actual args}} or
+                    # {"tool": "name", "params": {actual args}}
+                    for unwrap_key in ("arguments", "params", "parameters", "input"):
+                        if unwrap_key in obj and isinstance(obj[unwrap_key], dict):
+                            obj = obj[unwrap_key]
+                            break
+                        elif unwrap_key in obj and isinstance(obj[unwrap_key], list):
+                            obj.pop(unwrap_key, None)
                     logger.info(f"[Tools] Parsed JSON-inside-tool-tags format: {t}")
                     return t, obj
             except json.JSONDecodeError:
@@ -266,7 +427,8 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
 
     # ── Fallback 3: {"name": "tool_name", "arguments": {...}} format ──
     if not tool_match:
-        name_match = re.search(r'"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*?\})', text, re.DOTALL)
+        # Use a greedy match for the arguments block to capture nested objects
+        name_match = re.search(r'"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*\})', text, re.DOTALL)
         if name_match:
             tool_name = name_match.group(1).strip()
             tool_name = TOOL_ALIASES.get(tool_name, tool_name)
@@ -279,12 +441,12 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
 
     # ── Fallback 4: function_call(arg="value") syntax ──
     if not tool_match:
-        func_match = re.match(r'^(\w+)\((.*?)\)\s*$', text.strip(), re.DOTALL)
+        func_match = re.match(r'^(\w+)\s*\((.*)\)\s*$', text.strip(), re.DOTALL)
         if func_match:
             tool_name = func_match.group(1).strip()
             tool_name = TOOL_ALIASES.get(tool_name, tool_name)
             try:
-                args = dict(re.findall(r'(\w+)\s*=\s*["\']([^"\']*)["\']', func_match.group(2)))
+                args = _parse_function_call_args(tool_name, func_match.group(2))
                 logger.info(f"[Tools] Parsed function-call syntax: {tool_name}")
                 return tool_name, args
             except Exception:
@@ -298,32 +460,45 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
 
     args = {}
 
-    # ── Fallback 5: XML-style args <key>value</key> inside <args> ──
+    # ── Parse args content ──
     if args_match:
         raw_args = args_match.group(1).strip()
-        if raw_args.endswith("</args>"):
-            raw_args = raw_args[:-7].strip()
 
-        # Try standard JSON first
-        try:
-            args = json.loads(raw_args)
-        except json.JSONDecodeError:
-            # Try JSON repair
+        # Try standard JSON first (starts with {)
+        if raw_args.startswith('{'):
             try:
-                repaired = _repair_json(raw_args)
-                args = json.loads(repaired)
-                logger.info(f"[Tools] JSON repaired for tool '{tool_name}'")
+                args = json.loads(raw_args)
+                logger.debug(f"[Tools] JSON parsed for tool '{tool_name}': {list(args.keys())}")
             except json.JSONDecodeError:
-                # Try XML-style args: <key>value</key>
-                xml_pairs = re.findall(r'<(\w+)>(.*?)</\1>', raw_args, re.DOTALL)
-                if xml_pairs:
-                    args = {k: v.strip() for k, v in xml_pairs}
-                    logger.info(f"[Tools] Parsed XML-style args for tool '{tool_name}'")
+                # Try JSON repair
+                try:
+                    repaired = _repair_json(raw_args)
+                    args = json.loads(repaired)
+                    logger.info(f"[Tools] JSON repaired for tool '{tool_name}'")
+                except json.JSONDecodeError:
+                    logger.warning(
+                        f"[Tools] JSON parse failed for tool '{tool_name}'. "
+                        f"Raw: {raw_args[:200]}"
+                    )
+        else:
+            # Try XML-style args: <key>value</key>
+            xml_pairs = re.findall(r'<(\w+)>(.*?)</\1>', raw_args, re.DOTALL)
+            if xml_pairs:
+                args = {k: v.strip() for k, v in xml_pairs}
+                logger.info(f"[Tools] Parsed XML-style args for tool '{tool_name}': {list(args.keys())}")
+            else:
+                # Last resort: try key=value format (e.g., flag=CTF{test})
+                kv_pairs = re.findall(r'(\w+)\s*=\s*(.+?)(?:\s+\w+=|$)', raw_args)
+                if kv_pairs:
+                    args = {k: v.strip() for k, v in kv_pairs}
+                    logger.info(f"[Tools] Parsed key=value args for tool '{tool_name}'")
                 else:
                     logger.warning(
                         f"[Tools] Failed to parse args for tool '{tool_name}'. "
-                        f"Raw: {raw_args[:200]}"
+                        f"Raw: {raw_args[:300]}"
                     )
+    else:
+        logger.debug(f"[Tools] No <args> block found for tool '{tool_name}'")
 
     return tool_name, args
 

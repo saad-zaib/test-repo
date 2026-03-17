@@ -1,12 +1,12 @@
 """
-agent.py — CTF Lab Generation Agent (Multi-Phase Architecture)
+agent.py ΓÇö CTF Lab Generation Agent (Multi-Phase Architecture)
 
 Restructured from flat ReAct loop to multi-phase agent inspired by Strix:
-  Phase 1: RESEARCH — web_search + architecture planning
-  Phase 2: BUILD — write all files using skill blueprints
-  Phase 3: DEPLOY — docker compose up, health checks, log debugging
-  Phase 4: EXPLOIT — write and execute PoC, capture flag
-  Phase 5: FINALIZE — save exploit, register lab
+  Phase 1: RESEARCH ΓÇö web_search + architecture planning
+  Phase 2: BUILD ΓÇö write all files using skill blueprints
+  Phase 3: DEPLOY ΓÇö docker compose up, health checks, log debugging
+  Phase 4: EXPLOIT ΓÇö write and execute PoC, capture flag
+  Phase 5: FINALIZE ΓÇö save exploit, register lab
 
 Memory management:
   - Proper conversation history (not flattened strings)
@@ -39,7 +39,7 @@ from tools.reporting import set_workspace as reporting_set_workspace
 
 logger = logging.getLogger(__name__)
 
-# ─── Configuration ───────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Configuration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 MAX_ITERATIONS  = MAX_AGENT_ITERATIONS  # From config, default 150
 HISTORY_WINDOW  = 12     # Recent messages to keep in sliding window
@@ -48,15 +48,12 @@ WARN_AT_80_PCT  = True   # Strix-style iteration warnings
 WARN_AT_97_PCT  = True
 
 
-# ─── Agent Phase Tracking ────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Agent Phase Tracking ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 class AgentPhase:
     RESEARCH  = "research"
     BUILD     = "build"
     DEPLOY    = "deploy"
-    EXPLOIT   = "exploit"
-    FINALIZE  = "finalize"
-
 
 PHASE_TRANSITIONS = {
     # Detect phase transitions from tool usage
@@ -67,13 +64,7 @@ PHASE_TRANSITIONS = {
     "docker_build":    AgentPhase.DEPLOY,
     "docker_logs":     AgentPhase.DEPLOY,
     "wait_for_service": AgentPhase.DEPLOY,
-    "send_exploit":    AgentPhase.EXPLOIT,
-    "http_request":    AgentPhase.EXPLOIT,
-    "verify_flag":     AgentPhase.EXPLOIT,
-    "save_exploit_script": AgentPhase.FINALIZE,
-    "mark_lab_complete":   AgentPhase.FINALIZE,
-    "save_lab_metadata":   AgentPhase.FINALIZE,
-}
+
 
 PHASE_GOALS = {
     "research":  "Use web_search ONCE to confirm exploit technique, then immediately start writing files with write_file. Do NOT call web_search more than once.",
@@ -84,7 +75,7 @@ PHASE_GOALS = {
 }
 
 
-# ─── Checkpoint / Memory ────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Checkpoint / Memory ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 class Checkpoint:
     """Tracks milestone state that survives context window trimming."""
@@ -118,22 +109,22 @@ class Checkpoint:
     def to_summary(self) -> str:
         """Compact summary injected as a pinned message in context."""
         flag = self.spec.get("flag", "")
-        status = "✅ FLAG CAPTURED" if self.flag_found else "⏳ In Progress"
-        deploy_status = f"✅ Running on port {self.port}" if self.deployed else "❌ Not deployed"
+        status = "Γ£à FLAG CAPTURED" if self.flag_found else "ΓÅ│ In Progress"
+        deploy_status = f"Γ£à Running on port {self.port}" if self.deployed else "Γ¥î Not deployed"
 
         lines = [
-            f"[CHECKPOINT — Phase: {self.phase.upper()}]",
+            f"[CHECKPOINT ΓÇö Phase: {self.phase.upper()}]",
             f"Vuln: {self.spec.get('vuln_type', 'unknown')} | Difficulty: {self.spec.get('difficulty', 'medium')}",
             f"Files: {', '.join(self.built[-10:]) or 'none yet'}" + (f" (+{len(self.built)-10} more)" if len(self.built) > 10 else ""),
             f"Deploy: {deploy_status}",
-            f"Flag: {flag} — {status}",
+            f"Flag: {flag} ΓÇö {status}",
         ]
         if self.errors:
             lines.append(f"Recent errors: {'; '.join(self.errors[-2:])}")
         return "\n".join(lines)
 
 
-# ─── Context Window Management ───────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ Context Window Management ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 def manage_context(messages: list, checkpoint: Checkpoint) -> list:
     if len(messages) <= HISTORY_PIN + HISTORY_WINDOW:
@@ -159,7 +150,7 @@ def _build_exploit_brief(checkpoint: Checkpoint, spec: dict) -> str:
     so the AI can do WHITE-BOX exploitation instead of blind guessing."""
     port = checkpoint.port
     lines = [
-        f"[EXPLOIT PHASE — WHITE-BOX]",
+        f"[EXPLOIT PHASE ΓÇö WHITE-BOX]",
         f"Lab is running on http://localhost:{port}",
         f"Vulnerability: {spec.get('vuln_type')}",
         f"Target flag: {spec.get('flag')}",
@@ -233,10 +224,10 @@ def compact_for_phase(
         AgentPhase.DEPLOY: (
             f"[DEPLOY PHASE]\n"
             f"All files have been written. Deploy them now using EXACT tool signatures:\n"
-            f"  docker_up(compose_file=\".\")  ← starts containers via docker compose\n"
+            f"  docker_up(compose_file=\".\")  ΓåÉ starts containers via docker compose\n"
             f"  wait_for_service(url=\"http://localhost:{checkpoint.spec.get('assigned_port', 3000)}\", timeout=30)\n"
-            f"  docker_logs(container=\"<name>\", tail=50)  ← if startup fails\n"
-            f"  docker_build(context_path=\".\")  ← only if docker_up build step fails\n"
+            f"  docker_logs(container=\"<name>\", tail=50)  ΓåÉ if startup fails\n"
+            f"  docker_build(context_path=\".\")  ΓåÉ only if docker_up build step fails\n"
             f"Files ready: {', '.join(checkpoint.built)}\n"
             f"If docker_up fails: check docker_logs, fix the file, then docker_up again."
         ),
@@ -258,7 +249,7 @@ def compact_for_phase(
     ]
 
 
-# ─── ReAct Agent ─────────────────────────────────────────────────────────────
+# ΓöÇΓöÇΓöÇ ReAct Agent ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 class ReActAgent:
     """
@@ -317,19 +308,19 @@ class ReActAgent:
         last_tool_error: str | None = None
         repeated_error_count = 0
 
-        # Fix D: Semantic loop detector — track tool call patterns
+        # Fix D: Semantic loop detector ΓÇö track tool call patterns
         tool_history: list[str] = []
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             pct = (iteration / MAX_ITERATIONS) * 100
-            logger.info(f"[Agent] Iteration {iteration}/{MAX_ITERATIONS} ({pct:.0f}%) — Phase: {self.checkpoint.phase}")
+            logger.info(f"[Agent] Iteration {iteration}/{MAX_ITERATIONS} ({pct:.0f}%) ΓÇö Phase: {self.checkpoint.phase}")
 
-            # ── Iteration warnings (Strix-style) ─────────────────────────
+            # ΓöÇΓöÇ Iteration warnings (Strix-style) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if WARN_AT_80_PCT and iteration == int(MAX_ITERATIONS * 0.8):
                 messages.append({
                     "role": "user",
                     "content": (
-                        "⚠️ WARNING: You have used 80% of your iteration budget. "
+                        "ΓÜá∩╕Å WARNING: You have used 80% of your iteration budget. "
                         "Focus on completing the current phase. If the lab works, "
                         "run the exploit and call DONE immediately."
                     ),
@@ -339,25 +330,25 @@ class ReActAgent:
                 messages.append({
                     "role": "user",
                     "content": (
-                        "🚨 CRITICAL: Only 3% iterations remaining! "
+                        "≡ƒÜ¿ CRITICAL: Only 3% iterations remaining! "
                         "You MUST call DONE now or the lab generation will be marked as failed. "
                         "If the exploit worked, call DONE immediately."
                     ),
                 })
 
-            # ── Phase transition: compact context ─────────────────────────
+            # ΓöÇΓöÇ Phase transition: compact context ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             current_phase = self.checkpoint.phase
             if current_phase != last_phase and current_phase in (
                 AgentPhase.BUILD, AgentPhase.DEPLOY, AgentPhase.EXPLOIT, AgentPhase.FINALIZE
             ):
-                logger.info(f"[Agent] Phase transition: {last_phase} → {current_phase}")
+                logger.info(f"[Agent] Phase transition: {last_phase} ΓåÆ {current_phase}")
                 messages = compact_for_phase(self.system_prompt, self.checkpoint, current_phase)
                 last_phase = current_phase
 
-            # ── Context management ─────────────────────────────────────────
+            # ΓöÇΓöÇ Context management ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             messages = manage_context(messages, self.checkpoint)
 
-            # ── LLM call ───────────────────────────────────────────────────
+            # ΓöÇΓöÇ LLM call ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             try:
                 response = call_llm(
                     system_prompt=self.system_prompt,
@@ -376,7 +367,7 @@ class ReActAgent:
                 continue
 
             if not response:
-                logger.warning("[Agent] LLM returned empty response — nudging")
+                logger.warning("[Agent] LLM returned empty response ΓÇö nudging")
                 no_tool_count += 1
                 nudge_msg = (
                     "Output ONE tool call only. No reasoning, no explanation. Just:\n"
@@ -390,7 +381,7 @@ class ReActAgent:
             clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
             messages.append({"role": "assistant", "content": clean_response[:4000] or response[:300]})
 
-            # ── Parse tool call ─────────────────────────────────────────────
+            # ΓöÇΓöÇ Parse tool call ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             tool_name, args = parse_tool_call(response)
 
             if not tool_name:
@@ -414,7 +405,7 @@ class ReActAgent:
 
             no_tool_count = 0  # Reset on valid tool call
 
-            # ── DONE signal ─────────────────────────────────────────────────
+            # ΓöÇΓöÇ DONE signal ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if tool_name.upper() == "DONE":
                 if self.flag and not self._flag_seen_in_history(messages):
                     logger.warning(f"[Agent] DONE called but flag not confirmed!")
@@ -429,7 +420,7 @@ class ReActAgent:
                     })
                     continue
 
-                logger.info(f"[Agent] ✅ Lab complete after {iteration} iterations!")
+                logger.info(f"[Agent] Γ£à Lab complete after {iteration} iterations!")
                 return {
                     "status": "success",
                     "lab_id": self.lab_id,
@@ -437,13 +428,13 @@ class ReActAgent:
                     "summary": args.get("summary", "Lab generated successfully."),
                 }
 
-            # ── Execute tool ─────────────────────────────────────────────────
+            # ΓöÇΓöÇ Execute tool ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             logger.info(f"[Agent] Tool: {tool_name}({json.dumps(args)[:150]})")
             raw_output = execute_tool(tool_name, args, sandbox=self.sandbox)
             output = truncate_output(tool_name, raw_output)
             logger.info(f"[Agent] Output ({len(output)} chars): {output[:300]}")
 
-            # ── Loop-breaker: detect repeated identical failures ────────────
+            # ΓöÇΓöÇ Loop-breaker: detect repeated identical failures ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             is_error = output.startswith("ERROR")
             if is_error and tool_name == last_tool_name and output[:120] == (last_tool_error or "")[:120]:
                 repeated_error_count += 1
@@ -467,7 +458,7 @@ class ReActAgent:
                     last_tool_error = None
             last_tool_name = tool_name
 
-            # ── Fix D: Semantic loop detector ─────────────────────────────
+            # ΓöÇΓöÇ Fix D: Semantic loop detector ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             tool_history.append(tool_name)
             if len(tool_history) > 16:
                 tool_history = tool_history[-16:]
@@ -477,25 +468,25 @@ class ReActAgent:
                 writes = sum(1 for t in recent if t in ("write_file", "patch_file"))
                 deploys = sum(1 for t in recent if t in ("docker_up", "docker_build"))
                 if writes >= 3 and deploys >= 3:
-                    logger.warning("[Agent] ⚠️ Rewrite-rebuild loop detected!")
+                    logger.warning("[Agent] ΓÜá∩╕Å Rewrite-rebuild loop detected!")
                     messages.append({
                         "role": "user",
                         "content": (
-                            "⚠️ LOOP DETECTED: You have been alternating between rewriting files "
+                            "ΓÜá∩╕Å LOOP DETECTED: You have been alternating between rewriting files "
                             "and running docker commands for several iterations. STOP rewriting files.\n"
                             "Instead: 1) Run docker_down() first, 2) Then docker_up(compose_file=\".\"), "
                             "3) If build fails, check the EXACT stacktrace/error and fix ONLY the broken file "
                             "using patch_file(path, find, replace).\n"
-                            "Do NOT rewrite docker-compose.yml repeatedly — the version format is NOT the problem."
+                            "Do NOT rewrite docker-compose.yml repeatedly ΓÇö the version format is NOT the problem."
                         ),
                     })
                     tool_history.clear()
 
-            # ── Update checkpoint & phase ──────────────────────────────────
+            # ΓöÇΓöÇ Update checkpoint & phase ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             self._update_checkpoint(tool_name, args, output)
             self._detect_phase(tool_name, output)
 
-            # ── Feed observation back ──────────────────────────────────────
+            # ΓöÇΓöÇ Feed observation back ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             messages.append({"role": "user", "content": f"[Observation]\n{output}"})
             
             if tool_name == "wait_for_service" and "TIMEOUT" in output:
@@ -509,7 +500,7 @@ class ReActAgent:
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"The service timed out — the container is likely crashing at startup. "
+                        f"The service timed out ΓÇö the container is likely crashing at startup. "
                         f"Call docker_logs NOW with container=\"{container_name}\" to see the crash reason. "
                         f"Do NOT rewrite any files until you have read the logs."
                     ),
@@ -527,7 +518,7 @@ class ReActAgent:
             "files_created": len(self.checkpoint.built),
         }
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+    # ΓöÇΓöÇ Helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     def _flag_seen_in_history(self, messages: list) -> bool:
         """Check if the flag appeared in any observation/tool output."""
@@ -556,7 +547,7 @@ class ReActAgent:
         elif tool_name in ("verify_flag", "send_exploit", "http_request"):
             if self.flag and self.flag in output:
                 self.checkpoint.flag_found = True
-                logger.info(f"[Agent] 🏁 FLAG CAPTURED in {tool_name} output!")
+                logger.info(f"[Agent] ≡ƒÅü FLAG CAPTURED in {tool_name} output!")
 
         # Track errors for debugging context
         if "error" in output.lower()[:100] and tool_name not in ("web_search",):
@@ -574,6 +565,6 @@ class ReActAgent:
             # Only advance phases forward, never backward
             if phase_order.index(detected) >= phase_order.index(current):
                 if detected != current:
-                    logger.info(f"[Agent] Phase auto-detected: {current} → {detected}")
+                    logger.info(f"[Agent] Phase auto-detected: {current} ΓåÆ {detected}")
                 self.checkpoint.phase = detected
 
