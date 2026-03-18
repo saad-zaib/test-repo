@@ -1,11 +1,9 @@
 """
 tools/__init__.py — Central tool registry and dispatcher.
 
-Every tool is a plain Python function. The LLM calls tools by outputting:
-    <tool>tool_name</tool>
-    <args>{"key": "value"}</args>
-
-The dispatcher parses this, looks up the function, and calls it.
+Exploit-phase tools (send_exploit, verify_flag, decode_jwt, forge_jwt,
+save_exploit_script, run_strix_exploit) have been removed.
+The agent now stops at DEPLOY — no exploitation phase.
 """
 
 import inspect
@@ -16,7 +14,6 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-# ── Lazy imports to keep startup fast ──────────────────────────────────────────
 from tools.filesystem import (
     read_file, write_file, list_files, delete_file, append_file, patch_file,
 )
@@ -26,9 +23,6 @@ from tools.docker_tools import (
 )
 from tools.network import (
     http_request, wait_for_service, check_connectivity,
-)
-from tools.exploit import (
-    send_exploit, verify_flag, decode_jwt, forge_jwt,
 )
 from tools.database import (
     mongo_query, check_db_connection,
@@ -43,9 +37,8 @@ from tools.memory import (
     web_search, save_note, get_note, list_notes, get_spec,
 )
 from tools.reporting import (
-    save_lab_metadata, mark_lab_complete, save_exploit_script,
+    save_lab_metadata, mark_lab_complete,
 )
-from tools.strix_exploit import run_strix_exploit
 
 # ── Registry: name → function ───────────────────────────────────────────────
 TOOL_REGISTRY: dict[str, Callable] = {
@@ -67,67 +60,53 @@ TOOL_REGISTRY: dict[str, Callable] = {
     "docker_inspect":   docker_inspect,
 
     # Network
-    "http_request":     http_request,
-    "wait_for_service": wait_for_service,
+    "http_request":       http_request,
+    "wait_for_service":   wait_for_service,
     "check_connectivity": check_connectivity,
 
-    # Exploit & Attack
-    "send_exploit":     send_exploit,
-    "verify_flag":      verify_flag,
-    "decode_jwt":       decode_jwt,
-    "forge_jwt":        forge_jwt,
-
     # Database
-    "mongo_query":      mongo_query,
+    "mongo_query":        mongo_query,
     "check_db_connection": check_db_connection,
 
     # Build & Package
-    "npm_install":      npm_install,
-    "pip_install":      pip_install,
-    "npm_init":         npm_init,
-    "run_bash":         run_bash,
-    "check_installed":  check_installed,
+    "npm_install":    npm_install,
+    "pip_install":    pip_install,
+    "npm_init":       npm_init,
+    "run_bash":       run_bash,
+    "check_installed": check_installed,
 
     # Code Analysis
-    "check_syntax":     check_syntax,
-    "search_code":      search_code,
-    "validate_json":    validate_json,
+    "check_syntax":   check_syntax,
+    "search_code":    search_code,
+    "validate_json":  validate_json,
 
     # Memory & Context
-    "web_search":       web_search,
-    "save_note":        save_note,
-    "get_note":         get_note,
-    "list_notes":       list_notes,
-    "get_spec":         get_spec,
+    "web_search":  web_search,
+    "save_note":   save_note,
+    "get_note":    get_note,
+    "list_notes":  list_notes,
+    "get_spec":    get_spec,
 
     # Reporting
-    "save_lab_metadata":    save_lab_metadata,
-    "mark_lab_complete":    mark_lab_complete,
-    "save_exploit_script":  save_exploit_script,
-
-    # Strix Integration
-    "run_strix_exploit":    run_strix_exploit,
+    "save_lab_metadata": save_lab_metadata,
+    "mark_lab_complete": mark_lab_complete,
 }
 
 ALL_TOOLS = list(TOOL_REGISTRY.keys())
 
 
 def get_tool_descriptions() -> str:
-    """
-    Return a tool list with EXACT parameter signatures for injection into the system prompt.
-    Showing signatures prevents the LLM from guessing wrong argument names.
-    """
+    """Return tool list with EXACT parameter signatures for the system prompt."""
 
     categories = {
-        "Filesystem":  ["read_file", "write_file", "list_files", "delete_file", "append_file"],
-        "Docker":      ["docker_build", "docker_up", "docker_down", "docker_ps", "docker_logs", "docker_exec", "docker_inspect"],
-        "Network":     ["http_request", "wait_for_service", "check_connectivity"],
-        "Exploit":     ["send_exploit", "verify_flag", "decode_jwt", "forge_jwt"],
-        "Database":    ["mongo_query", "check_db_connection"],
-        "Build":       ["npm_install", "pip_install", "npm_init", "run_bash", "check_installed"],
-        "Analysis":    ["check_syntax", "search_code", "validate_json"],
-        "Memory":      ["web_search", "save_note", "get_note", "list_notes", "get_spec"],
-        "Reporting":   ["save_lab_metadata", "mark_lab_complete", "save_exploit_script"],
+        "Filesystem": ["read_file", "write_file", "patch_file", "list_files", "delete_file", "append_file"],
+        "Docker":     ["docker_build", "docker_up", "docker_down", "docker_ps", "docker_logs", "docker_exec", "docker_inspect"],
+        "Network":    ["http_request", "wait_for_service", "check_connectivity"],
+        "Database":   ["mongo_query", "check_db_connection"],
+        "Build":      ["npm_install", "pip_install", "npm_init", "run_bash", "check_installed"],
+        "Analysis":   ["check_syntax", "search_code", "validate_json"],
+        "Memory":     ["web_search", "save_note", "get_note", "list_notes", "get_spec"],
+        "Reporting":  ["save_lab_metadata", "mark_lab_complete"],
     }
 
     lines = ["AVAILABLE TOOLS (use EXACT parameter names shown):"]
@@ -139,12 +118,11 @@ def get_tool_descriptions() -> str:
                 continue
             doc = (fn.__doc__ or "").strip().split("\n")[0]
 
-            # Build signature string, excluding internal params like 'sandbox'
             try:
-                sig = inspect.signature(fn)
+                sig    = inspect.signature(fn)
                 params = []
                 for pname, param in sig.parameters.items():
-                    if pname in ("sandbox",):  # Internal injection params
+                    if pname in ("sandbox",):
                         continue
                     annotation = (
                         f": {param.annotation.__name__}"
@@ -153,8 +131,7 @@ def get_tool_descriptions() -> str:
                         else ""
                     )
                     if param.default is not inspect.Parameter.empty:
-                        default = repr(param.default)
-                        params.append(f"{pname}{annotation} = {default}")
+                        params.append(f"{pname}{annotation} = {repr(param.default)}")
                     else:
                         params.append(f"{pname}{annotation}")
                 sig_str = f"({', '.join(params)})"
@@ -165,39 +142,35 @@ def get_tool_descriptions() -> str:
 
     lines.append(
         "\n[Special]\n"
-        "  DONE(summary: str, flag: str) — Declare lab complete after flag is captured"
+        "  DONE(summary: str) — Declare lab complete after service is confirmed running"
     )
     return "\n".join(lines)
 
 
 def _repair_json(raw: str) -> str:
-    """
-    Fix common LLM JSON output issues:
-    - Raw newlines/tabs/carriage-returns inside string values (invalid in JSON spec)
-    - Auto-closes truncated strings, curly braces, and square brackets at the end.
-    """
-    result = []
+    """Fix common LLM JSON output issues."""
+    result   = []
     in_string = False
-    escape = False
-    i = 0
+    escape   = False
+    i        = 0
     while i < len(raw):
         c = raw[i]
         if escape:
             result.append(c)
             escape = False
-        elif c == '\\':
+        elif c == "\\":
             if in_string:
                 escape = True
             result.append(c)
         elif c == '"':
             in_string = not in_string
             result.append(c)
-        elif in_string and c == '\n':
-            result.append('\\n')
-        elif in_string and c == '\r':
-            result.append('\\r')
-        elif in_string and c == '\t':
-            result.append('\\t')
+        elif in_string and c == "\n":
+            result.append("\\n")
+        elif in_string and c == "\r":
+            result.append("\\r")
+        elif in_string and c == "\t":
+            result.append("\\t")
         else:
             result.append(c)
         i += 1
@@ -205,95 +178,77 @@ def _repair_json(raw: str) -> str:
     if in_string:
         result.append('"')
 
-    repaired = ''.join(result).strip()
-
-    # Very simplistic auto-closing of dicts/lists for truncated output
-    open_curly = repaired.count('{') - repaired.count('\\{')
-    close_curly = repaired.count('}') - repaired.count('\\}')
+    repaired    = "".join(result).strip()
+    open_curly  = repaired.count("{") - repaired.count("\\{")
+    close_curly = repaired.count("}") - repaired.count("\\}")
     if open_curly > close_curly:
-        repaired += '}' * (open_curly - close_curly)
+        repaired += "}" * (open_curly - close_curly)
 
     return repaired
 
 
-# ── Known function parameter names (position→name mapping) ──
 _TOOL_PARAM_NAMES: dict[str, list[str]] = {
-    "write_file":    ["path", "content"],
-    "read_file":     ["path"],
-    "delete_file":   ["path"],
-    "append_file":   ["path", "content"],
-    "patch_file":    ["path", "old_text", "new_text"],
-    "docker_up":     ["compose_file"],
-    "docker_down":   ["compose_file"],
-    "docker_build":  ["compose_file"],
-    "docker_logs":   ["service", "lines"],
-    "docker_exec":   ["container", "command"],
-    "http_request":  ["url", "method", "data", "headers"],
+    "write_file":       ["path", "content"],
+    "read_file":        ["path"],
+    "delete_file":      ["path"],
+    "append_file":      ["path", "content"],
+    "patch_file":       ["path", "old_text", "new_text"],
+    "docker_up":        ["compose_file"],
+    "docker_down":      ["compose_file"],
+    "docker_build":     ["compose_file"],
+    "docker_logs":      ["service", "lines"],
+    "docker_exec":      ["container", "command"],
+    "http_request":     ["url", "method", "payload", "headers"],
     "wait_for_service": ["url", "timeout"],
-    "send_exploit":  ["url", "method", "data", "headers"],
-    "verify_flag":   ["flag"],
-    "npm_install":   ["packages"],
-    "pip_install":   ["packages"],
-    "run_bash":      ["command"],
-    "web_search":    ["query"],
-    "list_files":    ["path"],
+    "npm_install":      ["packages"],
+    "pip_install":      ["packages"],
+    "run_bash":         ["command"],
+    "web_search":       ["query"],
+    "list_files":       ["path"],
 }
 
 
 def _parse_function_call_args(tool_name: str, raw: str) -> dict:
-    """
-    Parse function-call arguments like:
-      write_file(path="X", content="Y")
-      write_file(path="X", content=\\"\\"\\"multi\\nline\\"\\"\\")
-      write_file("X", "Y")              ← positional
-    
-    Returns a dict mapping param names to values.
-    """
+    """Parse function-call arguments like: write_file(path="X", content="Y")"""
     raw = raw.strip()
     if not raw:
         return {}
 
-    # ── Tokenize: extract string values (handling triple-quotes) ──
-    tokens: list[tuple[str | None, str]] = []   # (key_or_None, value)
+    tokens: list[tuple[str | None, str]] = []
     i = 0
     n = len(raw)
 
     while i < n:
-        # Skip whitespace and commas
-        while i < n and raw[i] in ' ,\t\r\n':
+        while i < n and raw[i] in " ,\t\r\n":
             i += 1
         if i >= n:
             break
 
-        # Try to read keyword: key=
-        key = None
-        key_match = re.match(r'(\w+)\s*=\s*', raw[i:])
+        key       = None
+        key_match = re.match(r"(\w+)\s*=\s*", raw[i:])
         if key_match:
             key = key_match.group(1)
-            i += key_match.end()
+            i  += key_match.end()
             if i >= n:
                 break
 
-        # Read value (string or bare token)
         if i < n and raw[i:i+3] in ('"""', "'''"):
-            # Triple-quoted string
             quote = raw[i:i+3]
-            i += 3
-            end = raw.find(quote, i)
+            i    += 3
+            end   = raw.find(quote, i)
             if end == -1:
-                value = raw[i:]  # unclosed — grab till end
-                i = n
+                value = raw[i:]
+                i     = n
             else:
                 value = raw[i:end]
-                i = end + 3
+                i     = end + 3
             tokens.append((key, value))
         elif i < n and raw[i] in ('"', "'"):
-            # Single-quoted string — but handle escaped quotes
-            quote = raw[i]
-            i += 1
+            quote       = raw[i]
+            i          += 1
             value_chars = []
             while i < n:
-                if raw[i] == '\\' and i + 1 < n:
+                if raw[i] == "\\" and i + 1 < n:
                     value_chars.append(raw[i:i+2])
                     i += 2
                 elif raw[i] == quote:
@@ -302,18 +257,17 @@ def _parse_function_call_args(tool_name: str, raw: str) -> dict:
                 else:
                     value_chars.append(raw[i])
                     i += 1
-            value = ''.join(value_chars)
-            # Process escape sequences
-            value = value.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'")
+            value = "".join(value_chars)
+            value = (value.replace("\\n", "\n").replace("\\t", "\t")
+                         .replace('\\"', '"').replace("\\'", "'"))
             tokens.append((key, value))
-        elif i < n and raw[i] == '{':
-            # JSON object as argument value
+        elif i < n and raw[i] == "{":
             depth = 0
             start = i
             while i < n:
-                if raw[i] == '{':
+                if raw[i] == "{":
                     depth += 1
-                elif raw[i] == '}':
+                elif raw[i] == "}":
                     depth -= 1
                     if depth == 0:
                         i += 1
@@ -325,17 +279,15 @@ def _parse_function_call_args(tool_name: str, raw: str) -> dict:
             except json.JSONDecodeError:
                 tokens.append((key, raw[start:i]))
         else:
-            # Bare word/number
-            m = re.match(r'[^\s,)]+', raw[i:])
+            m = re.match(r"[^\s,)]+", raw[i:])
             if m:
                 tokens.append((key, m.group(0)))
                 i += m.end()
             else:
                 i += 1
 
-    # ── Build args dict ──
-    args: dict = {}
-    positional_values: list[str] = []
+    args: dict             = {}
+    positional_values: list = []
 
     for key, value in tokens:
         if key:
@@ -343,17 +295,14 @@ def _parse_function_call_args(tool_name: str, raw: str) -> dict:
         else:
             positional_values.append(value)
 
-    # Map positional args to parameter names via known signature
     if positional_values:
         param_names = _TOOL_PARAM_NAMES.get(tool_name, [])
         for idx, val in enumerate(positional_values):
             if idx < len(param_names):
                 param_name = param_names[idx]
-                if param_name not in args:  # don't overwrite keyword args
+                if param_name not in args:
                     args[param_name] = val
-            # else: extra positional args silently dropped
 
-    logger.debug(f"[Tools] _parse_function_call_args('{tool_name}'): {list(args.keys())}")
     return args
 
 
@@ -378,166 +327,122 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
         "file_write":         "write_file",
     }
 
-    # Debug: log first 500 chars of response for debugging
     logger.debug(f"[Tools] Parsing response ({len(text)} chars): {text[:500]}")
 
     tool_match = re.search(r"<tool>(.*?)</tool>", text, re.DOTALL | re.IGNORECASE)
-    # Match ANY content inside <args> tags — not just JSON (could be XML-style)
     args_match = re.search(r"<args>\s*(.*?)\s*</args>", text, re.DOTALL | re.IGNORECASE)
     if not args_match:
-        # Fallback: unclosed <args> tag — grab everything after it
         args_match = re.search(r"<args>\s*(.*?)$", text, re.DOTALL | re.IGNORECASE)
 
-    # ── Fallback 1: <tool>{"tool": "name", ...}</tool> — JSON inside tool tags ──
+    # Fallback 1: JSON inside tool tags
     if tool_match:
         inner = tool_match.group(1).strip()
         if inner.startswith("{"):
             try:
                 obj = json.loads(inner)
-                t = obj.pop("tool", obj.pop("name", None))
+                t   = obj.pop("tool", obj.pop("name", None))
                 if t:
                     t = TOOL_ALIASES.get(t, t)
-                    # Unwrap "arguments" or "params" key if present — Qwen often uses
-                    # {"name": "tool", "arguments": {actual args}} or
-                    # {"tool": "name", "params": {actual args}}
                     for unwrap_key in ("arguments", "params", "parameters", "input"):
                         if unwrap_key in obj and isinstance(obj[unwrap_key], dict):
                             obj = obj[unwrap_key]
                             break
                         elif unwrap_key in obj and isinstance(obj[unwrap_key], list):
                             obj.pop(unwrap_key, None)
-                    logger.info(f"[Tools] Parsed JSON-inside-tool-tags format: {t}")
                     return t, obj
             except json.JSONDecodeError:
                 pass
 
-    # ── Fallback 2: {"action": "tool_name", ...} — action key format ──
+    # Fallback 2: action key format
     if not tool_match:
         action_match = re.search(r'^\s*\{.*?"action"\s*:\s*"([^"]+)"', text, re.DOTALL)
         if action_match:
-            tool_name = action_match.group(1).strip()
-            tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+            tool_name = TOOL_ALIASES.get(action_match.group(1).strip(), action_match.group(1).strip())
             try:
                 obj = json.loads(text.strip())
                 obj.pop("action", None)
-                logger.info(f"[Tools] Parsed action-key format: {tool_name}")
                 return tool_name, obj
             except json.JSONDecodeError:
                 pass
 
-    # ── Fallback 3: {"name": "tool_name", "arguments": {...}} format ──
+    # Fallback 3: name/arguments format
     if not tool_match:
-        # Use a greedy match for the arguments block to capture nested objects
         name_match = re.search(r'"name"\s*:\s*"([^"]+)".*?"arguments"\s*:\s*(\{.*\})', text, re.DOTALL)
         if name_match:
-            tool_name = name_match.group(1).strip()
-            tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+            tool_name = TOOL_ALIASES.get(name_match.group(1).strip(), name_match.group(1).strip())
             try:
-                args = json.loads(name_match.group(2))
-                logger.info(f"[Tools] Parsed name/arguments format: {tool_name}")
-                return tool_name, args
+                return tool_name, json.loads(name_match.group(2))
             except json.JSONDecodeError:
                 pass
 
-    # ── Fallback 4: function_call(arg="value") syntax ──
+    # Fallback 4: function_call syntax
     if not tool_match:
-        func_match = re.match(r'^(\w+)\s*\((.*)\)\s*$', text.strip(), re.DOTALL)
+        func_match = re.match(r"^(\w+)\s*\((.*)\)\s*$", text.strip(), re.DOTALL)
         if func_match:
-            tool_name = func_match.group(1).strip()
-            tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+            tool_name = TOOL_ALIASES.get(func_match.group(1).strip(), func_match.group(1).strip())
             try:
-                args = _parse_function_call_args(tool_name, func_match.group(2))
-                logger.info(f"[Tools] Parsed function-call syntax: {tool_name}")
-                return tool_name, args
+                return tool_name, _parse_function_call_args(tool_name, func_match.group(2))
             except Exception:
                 pass
 
     if not tool_match:
         return None, {}
 
-    tool_name = tool_match.group(1).strip().split('\n')[0].split('{')[0].strip()
+    tool_name = tool_match.group(1).strip().split("\n")[0].split("{")[0].strip()
     tool_name = TOOL_ALIASES.get(tool_name, tool_name)
+    args      = {}
 
-    args = {}
-
-    # ── Parse args content ──
     if args_match:
         raw_args = args_match.group(1).strip()
 
-        # Try standard JSON first (starts with {)
-        if raw_args.startswith('{'):
+        if raw_args.startswith("{"):
             try:
                 args = json.loads(raw_args)
-                logger.debug(f"[Tools] JSON parsed for tool '{tool_name}': {list(args.keys())}")
             except json.JSONDecodeError:
-                # Try JSON repair
                 try:
-                    repaired = _repair_json(raw_args)
-                    args = json.loads(repaired)
+                    args = json.loads(_repair_json(raw_args))
                     logger.info(f"[Tools] JSON repaired for tool '{tool_name}'")
                 except json.JSONDecodeError:
-                    logger.warning(
-                        f"[Tools] JSON parse failed for tool '{tool_name}'. "
-                        f"Raw: {raw_args[:200]}"
-                    )
+                    logger.warning(f"[Tools] JSON parse failed for tool '{tool_name}'. Raw: {raw_args[:200]}")
         else:
-            # Try XML-style args: <key>value</key>
-            xml_pairs = re.findall(r'<(\w+)>(.*?)</\1>', raw_args, re.DOTALL)
+            xml_pairs = re.findall(r"<(\w+)>(.*?)</\1>", raw_args, re.DOTALL)
             if xml_pairs:
                 args = {k: v.strip() for k, v in xml_pairs}
-                logger.info(f"[Tools] Parsed XML-style args for tool '{tool_name}': {list(args.keys())}")
             else:
-                # Last resort: try key=value format (e.g., flag=CTF{test})
-                kv_pairs = re.findall(r'(\w+)\s*=\s*(.+?)(?:\s+\w+=|$)', raw_args)
+                kv_pairs = re.findall(r"(\w+)\s*=\s*(.+?)(?:\s+\w+=|$)", raw_args)
                 if kv_pairs:
                     args = {k: v.strip() for k, v in kv_pairs}
-                    logger.info(f"[Tools] Parsed key=value args for tool '{tool_name}'")
-                else:
-                    logger.warning(
-                        f"[Tools] Failed to parse args for tool '{tool_name}'. "
-                        f"Raw: {raw_args[:300]}"
-                    )
-    else:
-        logger.debug(f"[Tools] No <args> block found for tool '{tool_name}'")
 
     return tool_name, args
 
 
 def execute_tool(tool_name: str, args: dict, sandbox=None) -> str:
-    """
-    Look up and call a tool by name.
-
-    - Injects sandbox for tools that need it.
-    - Silently strips unexpected kwargs to prevent TypeErrors from LLM hallucination.
-    """
+    """Look up and call a tool by name."""
     if tool_name not in TOOL_REGISTRY:
         categorized = {
-            "files": ["read_file","write_file","patch_file","list_files","delete_file"],
-            "docker": ["docker_up","docker_down","docker_logs","docker_ps","docker_exec"],
-            "network": ["http_request","wait_for_service","send_exploit","verify_flag"],
-            "build": ["run_bash","npm_install","pip_install"],
-            "search": ["web_search"],
+            "files":   ["read_file", "write_file", "patch_file", "list_files", "delete_file"],
+            "docker":  ["docker_up", "docker_down", "docker_logs", "docker_ps", "docker_exec"],
+            "network": ["http_request", "wait_for_service"],
+            "build":   ["run_bash", "npm_install", "pip_install"],
+            "search":  ["web_search"],
         }
-        hint = "\n".join(f"  {k}: {', '.join(v)}" for k,v in categorized.items())
+        hint = "\n".join(f"  {k}: {', '.join(v)}" for k, v in categorized.items())
         return f"ERROR: Unknown tool '{tool_name}'.\nAvailable tools:\n{hint}"
 
     fn = TOOL_REGISTRY[tool_name]
 
-    # Inject sandbox reference for tools that need it
     if sandbox is not None and "sandbox" not in args:
         if "sandbox" in inspect.signature(fn).parameters:
             args = {**args, "sandbox": sandbox}
 
-    # ── Strip unknown kwargs (prevents TypeError from LLM adding extra args) ──
-    valid_params = set(inspect.signature(fn).parameters.keys())
+    valid_params  = set(inspect.signature(fn).parameters.keys())
     filtered_args = {k: v for k, v in args.items() if k in valid_params}
-    dropped = set(args.keys()) - set(filtered_args.keys())
+    dropped       = set(args.keys()) - set(filtered_args.keys())
     if dropped:
         logger.warning(f"[Tools] Dropped unknown args for '{tool_name}': {dropped}")
 
     try:
-        result = fn(**filtered_args)
-        return str(result)
+        return str(fn(**filtered_args))
     except TypeError as e:
         return f"ERROR: Wrong arguments for '{tool_name}': {e}"
     except Exception as e:
@@ -546,39 +451,32 @@ def execute_tool(tool_name: str, args: dict, sandbox=None) -> str:
 
 
 def truncate_output(tool_name: str, output: str) -> str:
-    """
-    Error-aware output truncation.
-    - ERROR outputs: show up to ERROR_LIMIT chars so the LLM gets full diagnostics.
-    - OK outputs: head+tail truncation with per-tool budgets to protect context window.
-    """
-    ERROR_LIMIT = 4000  # Increased — errors need full context for diagnosis
+    """Error-aware output truncation."""
+    ERROR_LIMIT = 4000
 
     limits = {
-        "read_file":        1500,
-        "docker_logs":      1000,
-        "docker_up":        3000,  # Increased — build errors are deep in the output
-        "docker_down":      400,
-        "docker_build":     3000,  # Increased — same reason
-        "run_bash":         800,
-        "npm_install":      600,
-        "pip_install":      400,
-        "http_request":     600,
-        "send_exploit":     600,
-        "web_search":       500,
-        "docker_ps":        300,
-        "docker_inspect":   400,
-        "search_code":      600,
-        "mongo_query":      400,
+        "read_file":     1500,
+        "docker_logs":   1000,
+        "docker_up":     3000,
+        "docker_down":    400,
+        "docker_build":  3000,
+        "run_bash":       800,
+        "npm_install":    600,
+        "pip_install":    400,
+        "http_request":   600,
+        "web_search":     500,
+        "docker_ps":      300,
+        "docker_inspect": 400,
+        "search_code":    600,
+        "mongo_query":    400,
     }
 
     is_error = output.lstrip().upper().startswith("ERROR")
     if is_error:
-        # Errors: show as much as possible so the LLM can diagnose
         if len(output) > ERROR_LIMIT:
             return output[:ERROR_LIMIT] + f"\n...[truncated — showing first {ERROR_LIMIT} of {len(output)} chars]"
         return output
 
-    # Success: head+tail truncation so both start and end are visible
     limit = limits.get(tool_name, 600)
     if len(output) > limit:
         half = limit // 2

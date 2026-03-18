@@ -1,9 +1,10 @@
 const express = require('express');
-const betterSqlite3 = require('better-sqlite3');
-const app = express();
-const db = betterSqlite3('database.db');
+const Database = require('better-sqlite3');
 
-// Initialize database
+const app = express();
+const db = new Database('db.sqlite');
+
+// Initialize database schema and data
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -14,12 +15,11 @@ db.exec(`
     id INTEGER PRIMARY KEY,
     flag TEXT
   );
-  INSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'SuperSecretPass2024!');
-  INSERT OR IGNORE INTO secrets (flag) VALUES ('CTF{test}');
+  INSERT OR IGNORE INTO users (id, username, password) VALUES (1, 'admin', 'SuperSecretPass2024!');
+  INSERT OR IGNORE INTO secrets (id, flag) VALUES (1, 'CTF{test}');
 `);
 
-app.use(express.json());
-
+// VULNERABLE: sqli_union — raw string interpolation
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
     const query = `SELECT * FROM users WHERE username = '${username}' AND password = '${password}'`;
@@ -29,7 +29,6 @@ app.post('/login', (req, res) => {
     return res.status(401).send("Invalid credentials");
 });
 
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(3000, () => {
+    console.log('Server running on port 3000');
 });

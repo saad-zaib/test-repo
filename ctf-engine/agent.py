@@ -1,19 +1,18 @@
 """
-agent.py ΓÇö CTF Lab Generation Agent (Multi-Phase Architecture)
+agent.py — CTF Lab Generation Agent (Multi-Phase Architecture)
 
-Restructured from flat ReAct loop to multi-phase agent inspired by Strix:
-  Phase 1: RESEARCH ΓÇö web_search + architecture planning
-  Phase 2: BUILD ΓÇö write all files using skill blueprints
-  Phase 3: DEPLOY ΓÇö docker compose up, health checks, log debugging
-  Phase 4: EXPLOIT ΓÇö write and execute PoC, capture flag
-  Phase 5: FINALIZE ΓÇö save exploit, register lab
+Phases:
+  Phase 1: RESEARCH — web_search + architecture planning
+  Phase 2: BUILD    — write all files using skill blueprints
+  Phase 3: DEPLOY   — docker compose up, health checks, log validation, then DONE
 
-Memory management:
-  - Proper conversation history (not flattened strings)
-  - Milestone checkpointing with pinned messages
-  - Sliding window with configurable size
-  - Hard context compaction at phase transitions
-  - Strix-style iteration warnings at 80%/97%
+DONE flow (no exploitation):
+  1. docker_build  — build image, catch errors early
+  2. docker_up     — start containers
+  3. wait_for_service — wait for port to respond
+  4. docker_logs   — check for errors; fix broken file if needed
+  5. http_request  — confirm endpoint responds
+  6. DONE (background checks: flag in workspace file, logs + http confirmed)
 """
 
 import inspect
@@ -39,56 +38,70 @@ from tools.reporting import set_workspace as reporting_set_workspace
 
 logger = logging.getLogger(__name__)
 
-# ΓöÇΓöÇΓöÇ Configuration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Configuration ───────────────────────────────────────────────────────────────
 
-MAX_ITERATIONS  = MAX_AGENT_ITERATIONS  # From config, default 150
-HISTORY_WINDOW  = 12     # Recent messages to keep in sliding window
-HISTORY_PIN     = 3      # Pinned messages at start (system + checkpoint + goal)
-WARN_AT_80_PCT  = True   # Strix-style iteration warnings
-WARN_AT_97_PCT  = True
+MAX_ITERATIONS = MAX_AGENT_ITERATIONS   # 50
+HISTORY_WINDOW = 12
+HISTORY_PIN    = 3
+WARN_AT_80_PCT = True
+WARN_AT_97_PCT = True
 
 
-# ΓöÇΓöÇΓöÇ Agent Phase Tracking ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Agent Phase Tracking ────────────────────────────────────────────────────────
 
 class AgentPhase:
-    RESEARCH  = "research"
-    BUILD     = "build"
-    DEPLOY    = "deploy"
+    RESEARCH = "research"
+    BUILD    = "build"
+    DEPLOY   = "deploy"
+
 
 PHASE_TRANSITIONS = {
-    # Detect phase transitions from tool usage
-    "web_search":      AgentPhase.RESEARCH,
-    "write_file":      AgentPhase.BUILD,
-    "patch_file":      AgentPhase.BUILD,
-    "docker_up":       AgentPhase.DEPLOY,
-    "docker_build":    AgentPhase.DEPLOY,
-    "docker_logs":     AgentPhase.DEPLOY,
+    "web_search":       AgentPhase.RESEARCH,
+    "write_file":       AgentPhase.BUILD,
+    "patch_file":       AgentPhase.BUILD,
+    "docker_up":        AgentPhase.DEPLOY,
+    "docker_build":     AgentPhase.DEPLOY,
+    "docker_logs":      AgentPhase.DEPLOY,
     "wait_for_service": AgentPhase.DEPLOY,
-
+}
 
 PHASE_GOALS = {
-    "research":  "Use web_search ONCE to confirm exploit technique, then immediately start writing files with write_file. Do NOT call web_search more than once.",
-    "build":     "Write all required files using write_file. Do NOT call web_search.",
-    "deploy":    "Run docker_up, then wait_for_service. If it fails, check docker_logs and fix the file.",
-    "exploit":   "Send the exploit payload using send_exploit or http_request. Capture the flag.",
-    "finalize":  "Call save_exploit_script then DONE.",
+    "research": (
+        "Use web_search ONCE to confirm exploit technique, then immediately start "
+        "writing files with write_file. Do NOT call web_search more than once."
+    ),
+    "build": "Write all required files using write_file. Do NOT call web_search.",
+    "deploy": (
+        "Deploy in this EXACT order:\n"
+        "1. docker_build(context_path=\".\")  — build image first\n"
+        "2. docker_up(compose_file=\".\")     — start containers\n"
+        "3. wait_for_service                  — wait for port\n"
+        "4. docker_logs                       — check for errors/warnings\n"
+        "5. http_request to /login            — confirm endpoint responds\n"
+        "6. DONE\n"
+        "If errors at any step: fix ONLY the broken file with patch_file, restart from step 1."
+    ),
 }
 
 
-# ΓöÇΓöÇΓöÇ Checkpoint / Memory ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Checkpoint / Memory ─────────────────────────────────────────────────────────
 
 class Checkpoint:
     """Tracks milestone state that survives context window trimming."""
 
     def __init__(self, spec: dict):
-        self.spec       = spec
-        self.phase      = AgentPhase.RESEARCH
-        self.built      = []        # Files created
-        self.deployed   = False     # docker compose up succeeded
-        self.port       = spec.get("assigned_port", 3000)  # Dynamic port
-        self.flag_found = False     # Flag confirmed in exploit output
-        self.errors     = []        # Error history for debugging
-        self.file_contents: dict[str, str] = {}  # Store file contents for white-box exploit context
+        self.spec      = spec
+        self.phase     = AgentPhase.RESEARCH
+        self.built     = []
+        self.deployed  = False
+        self.port      = spec.get("assigned_port", 3000)
+        self.errors    = []
+        self.file_contents: dict[str, str] = {}
+        # Deploy sequence tracking — enforced before DONE is accepted
+        self.docker_built:   bool = False  # docker_build succeeded
+        self.docker_upped:   bool = False  # docker_up succeeded
+        self.logs_checked:   bool = False  # docker_logs called after deploy
+        self.http_confirmed: bool = False  # http_request called after deploy
 
     def record_file(self, path: str, content: str = ""):
         if path not in self.built:
@@ -103,34 +116,31 @@ class Checkpoint:
 
     def record_error(self, error: str):
         self.errors.append(error)
-        if len(self.errors) > 5:  # Keep only recent errors
+        if len(self.errors) > 5:
             self.errors = self.errors[-5:]
 
     def to_summary(self) -> str:
-        """Compact summary injected as a pinned message in context."""
-        flag = self.spec.get("flag", "")
-        status = "Γ£à FLAG CAPTURED" if self.flag_found else "ΓÅ│ In Progress"
-        deploy_status = f"Γ£à Running on port {self.port}" if self.deployed else "Γ¥î Not deployed"
-
+        flag          = self.spec.get("flag", "")
+        deploy_status = f"✅ Running on port {self.port}" if self.deployed else "❌ Not deployed"
         lines = [
-            f"[CHECKPOINT ΓÇö Phase: {self.phase.upper()}]",
+            f"[CHECKPOINT — Phase: {self.phase.upper()}]",
             f"Vuln: {self.spec.get('vuln_type', 'unknown')} | Difficulty: {self.spec.get('difficulty', 'medium')}",
-            f"Files: {', '.join(self.built[-10:]) or 'none yet'}" + (f" (+{len(self.built)-10} more)" if len(self.built) > 10 else ""),
+            f"Files: {', '.join(self.built[-10:]) or 'none yet'}"
+            + (f" (+{len(self.built)-10} more)" if len(self.built) > 10 else ""),
             f"Deploy: {deploy_status}",
-            f"Flag: {flag} ΓÇö {status}",
+            f"Flag to embed: {flag}",
         ]
         if self.errors:
             lines.append(f"Recent errors: {'; '.join(self.errors[-2:])}")
         return "\n".join(lines)
 
 
-# ΓöÇΓöÇΓöÇ Context Window Management ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── Context Window Management ───────────────────────────────────────────────────
 
 def manage_context(messages: list, checkpoint: Checkpoint) -> list:
     if len(messages) <= HISTORY_PIN + HISTORY_WINDOW:
         if len(messages) > 1:
             messages[1] = {"role": "user", "content": checkpoint.to_summary()}
-        # Update goal message to current phase
         if len(messages) > 2:
             messages[2] = {"role": "user", "content": PHASE_GOALS[checkpoint.phase]}
         return messages
@@ -145,97 +155,43 @@ def manage_context(messages: list, checkpoint: Checkpoint) -> list:
     return pinned + recent
 
 
-def _build_exploit_brief(checkpoint: Checkpoint, spec: dict) -> str:
-    """Build a rich exploit-phase context with the actual source code
-    so the AI can do WHITE-BOX exploitation instead of blind guessing."""
-    port = checkpoint.port
-    lines = [
-        f"[EXPLOIT PHASE ΓÇö WHITE-BOX]",
-        f"Lab is running on http://localhost:{port}",
-        f"Vulnerability: {spec.get('vuln_type')}",
-        f"Target flag: {spec.get('flag')}",
-        "",
-    ]
-
-    # Inject source code from BUILD phase so the AI knows the schema
-    if checkpoint.file_contents:
-        lines.append("=== SOURCE CODE (you wrote these files) ===")
-        # Prioritize app code files, limit total size
-        priority_exts = ('.js', '.py', '.ts', '.php', '.rb', '.go')
-        code_files = {}
-        other_files = {}
-        for path, content in checkpoint.file_contents.items():
-            if any(path.endswith(ext) for ext in priority_exts):
-                code_files[path] = content
-            else:
-                other_files[path] = content
-
-        total_chars = 0
-        max_chars = 4000  # Keep within context budget
-
-        for path, content in code_files.items():
-            if total_chars + len(content) > max_chars:
-                lines.append(f"\n--- {path} (truncated) ---")
-                remaining = max_chars - total_chars
-                lines.append(content[:remaining])
-                total_chars = max_chars
-                break
-            lines.append(f"\n--- {path} ---")
-            lines.append(content)
-            total_chars += len(content)
-
-        # Add Dockerfile/compose if space allows
-        for path, content in other_files.items():
-            if total_chars + len(content) > max_chars:
-                break
-            lines.append(f"\n--- {path} ---")
-            lines.append(content)
-            total_chars += len(content)
-
-        lines.append("=== END SOURCE CODE ===")
-        lines.append("")
-
-    lines.extend([
-        "INSTRUCTIONS:",
-        "You have the full source code above. Use it to craft a PRECISE exploit.",
-        "1. Count the EXACT number of columns in the vulnerable SELECT query.",
-        "2. Your UNION SELECT must have the SAME number of columns.",
-        "3. Place the flag column in the position that maps to the property",
-        "   the application code reads (check the response line like `user.flag`).",
-        "4. Use send_exploit / http_request to retrieve the flag.",
-        "5. Then call verify_flag, save_exploit_script, and DONE.",
-    ])
-
-    return "\n".join(lines)
-
-
 def compact_for_phase(
     system_prompt: str,
     checkpoint: Checkpoint,
     new_phase: str,
 ) -> list:
-    """
-    Hard context reset at phase transitions.
-    Clears build history and gives the LLM a clean phase-specific context.
-    """
+    """Hard context reset at phase transitions."""
     spec = checkpoint.spec
+    port = spec.get("assigned_port", 3000)
 
     phase_briefs = {
+        AgentPhase.BUILD: (
+            f"[BUILD PHASE]\n"
+            f"Research is complete. Now write ALL required files:\n"
+            f"  write_file(path=\"package.json\", content=\"...\")\n"
+            f"  write_file(path=\"server.js\", content=\"...\")  ← embed flag here\n"
+            f"  write_file(path=\"Dockerfile\", content=\"...\")\n"
+            f"  write_file(path=\"docker-compose.yml\", content=\"...\")\n\n"
+            f"Flag to embed in source: {spec.get('flag', '')}\n"
+            f"Vulnerability: {spec.get('vuln_type', '')}\n\n"
+            f"Do NOT call web_search. Write files directly using write_file."
+        ),
         AgentPhase.DEPLOY: (
             f"[DEPLOY PHASE]\n"
-            f"All files have been written. Deploy them now using EXACT tool signatures:\n"
-            f"  docker_up(compose_file=\".\")  ΓåÉ starts containers via docker compose\n"
-            f"  wait_for_service(url=\"http://localhost:{checkpoint.spec.get('assigned_port', 3000)}\", timeout=30)\n"
-            f"  docker_logs(container=\"<name>\", tail=50)  ΓåÉ if startup fails\n"
-            f"  docker_build(context_path=\".\")  ΓåÉ only if docker_up build step fails\n"
-            f"Files ready: {', '.join(checkpoint.built)}\n"
-            f"If docker_up fails: check docker_logs, fix the file, then docker_up again."
-        ),
-        AgentPhase.EXPLOIT: _build_exploit_brief(checkpoint, spec),
-        AgentPhase.FINALIZE: (
-            f"[FINALIZE PHASE]\n"
-            f"Flag captured! Save the exploit script and finalize the lab.\n"
-            f"Call save_exploit_script, then save_lab_metadata, then DONE."
+            f"All files written. Deploy and verify the lab IN THIS EXACT ORDER:\n\n"
+            f"  STEP 1: docker_build(context_path=\'.\')"
+            f"  -> build image, catch errors early\n"
+            f"  STEP 2: docker_up(compose_file=\'.\')"
+            f"     -> start containers\n"
+            f"  STEP 3: wait_for_service(url=\'http://localhost:{port}\', timeout=30)\n"
+            f"  STEP 4: docker_logs(container=\'<name>\', tail=50) -> CHECK FOR ERRORS\n"
+            f"          - Errors found -> patch_file to fix, then restart from STEP 1\n"
+            f"          - Non-critical warnings (npm deprecation, etc.) -> safe to ignore\n"
+            f"  STEP 5: http_request(url=\'http://localhost:{port}/login\', method=\'POST\')\n"
+            f"          -> Any HTTP response (even 401) confirms the service is alive\n"
+            f"  STEP 6: Call DONE\n\n"
+            f"Do NOT skip any step. Do NOT attempt to exploit the vulnerability.\n"
+            f"Files ready: {', '.join(checkpoint.built)}"
         ),
     }
 
@@ -249,12 +205,12 @@ def compact_for_phase(
     ]
 
 
-# ΓöÇΓöÇΓöÇ ReAct Agent ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+# ── ReAct Agent ─────────────────────────────────────────────────────────────────
 
 class ReActAgent:
     """
     Multi-phase tool-using agent for CTF lab generation.
-    Uses proper conversation history with Strix-style memory management.
+    Stops at DEPLOY — no exploit or finalize phases.
     """
 
     def __init__(self, spec: dict, sandbox: DockerSandbox, workspace: str):
@@ -265,22 +221,17 @@ class ReActAgent:
         self.flag       = spec.get("flag", "")
         self.checkpoint = Checkpoint(spec)
 
-        # Wire workspace into tool modules
         fs_set_workspace(workspace)
-        docker_set_workspace(workspace)  # Fix: docker paths resolve to lab workspace
+        docker_set_workspace(workspace)
         reporting_set_workspace(workspace)
         memory_set_spec(spec)
 
-        # Load skill blueprint
         self.skill_content = load_skill(spec.get("vuln_type", ""))
-
-        # Build system prompt via Jinja2
         self.system_prompt = render_system_prompt(spec, self.skill_content)
 
     def _initial_messages(self) -> list:
-        """Build the initial conversation context."""
         research_goal = (
-            PHASE_GOALS['research'] if not self.skill_content
+            PHASE_GOALS["research"] if not self.skill_content
             else "The skill blueprint above has all the info you need. Skip web_search and go directly to write_file."
         )
         return [
@@ -299,30 +250,30 @@ class ReActAgent:
 
     def run(self) -> dict:
         """Run the multi-phase ReAct loop until DONE or max iterations."""
-        messages = self._initial_messages()
-        last_phase = AgentPhase.RESEARCH
-        no_tool_count = 0  # Consecutive responses without a tool call
+        messages       = self._initial_messages()
+        last_phase     = AgentPhase.RESEARCH
+        no_tool_count  = 0
 
-        # Loop-breaker: track repeated failures of the same tool
-        last_tool_name: str | None = None
+        last_tool_name:  str | None = None
         last_tool_error: str | None = None
         repeated_error_count = 0
 
-        # Fix D: Semantic loop detector ΓÇö track tool call patterns
         tool_history: list[str] = []
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             pct = (iteration / MAX_ITERATIONS) * 100
-            logger.info(f"[Agent] Iteration {iteration}/{MAX_ITERATIONS} ({pct:.0f}%) ΓÇö Phase: {self.checkpoint.phase}")
+            logger.info(
+                f"[Agent] Iteration {iteration}/{MAX_ITERATIONS} ({pct:.0f}%) "
+                f"— Phase: {self.checkpoint.phase}"
+            )
 
-            # ΓöÇΓöÇ Iteration warnings (Strix-style) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Iteration budget warnings ─────────────────────────────────────
             if WARN_AT_80_PCT and iteration == int(MAX_ITERATIONS * 0.8):
                 messages.append({
                     "role": "user",
                     "content": (
-                        "ΓÜá∩╕Å WARNING: You have used 80% of your iteration budget. "
-                        "Focus on completing the current phase. If the lab works, "
-                        "run the exploit and call DONE immediately."
+                        "⚠️ WARNING: 80% of iteration budget used. "
+                        "If the lab is deployed and responding, call DONE immediately."
                     ),
                 })
 
@@ -330,25 +281,24 @@ class ReActAgent:
                 messages.append({
                     "role": "user",
                     "content": (
-                        "≡ƒÜ¿ CRITICAL: Only 3% iterations remaining! "
-                        "You MUST call DONE now or the lab generation will be marked as failed. "
-                        "If the exploit worked, call DONE immediately."
+                        "🚨 CRITICAL: Only 3% iterations remaining! "
+                        "Call DONE now or generation will be marked failed."
                     ),
                 })
 
-            # ΓöÇΓöÇ Phase transition: compact context ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Phase transition: compact context ─────────────────────────────
             current_phase = self.checkpoint.phase
             if current_phase != last_phase and current_phase in (
-                AgentPhase.BUILD, AgentPhase.DEPLOY, AgentPhase.EXPLOIT, AgentPhase.FINALIZE
+                AgentPhase.BUILD, AgentPhase.DEPLOY
             ):
-                logger.info(f"[Agent] Phase transition: {last_phase} ΓåÆ {current_phase}")
-                messages = compact_for_phase(self.system_prompt, self.checkpoint, current_phase)
+                logger.info(f"[Agent] Phase transition: {last_phase} → {current_phase}")
+                messages   = compact_for_phase(self.system_prompt, self.checkpoint, current_phase)
                 last_phase = current_phase
 
-            # ΓöÇΓöÇ Context management ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Context management ────────────────────────────────────────────
             messages = manage_context(messages, self.checkpoint)
 
-            # ΓöÇΓöÇ LLM call ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── LLM call ─────────────────────────────────────────────────────
             try:
                 response = call_llm(
                     system_prompt=self.system_prompt,
@@ -362,26 +312,25 @@ class ReActAgent:
                 self.checkpoint.record_error(f"LLM error: {e}")
                 messages.append({
                     "role": "user",
-                    "content": f"LLM error occurred: {e}. Please try again with your next tool call.",
+                    "content": f"LLM error: {e}. Please try again with your next tool call.",
                 })
                 continue
 
             if not response:
-                logger.warning("[Agent] LLM returned empty response ΓÇö nudging")
+                logger.warning("[Agent] LLM returned empty response — nudging")
                 no_tool_count += 1
-                nudge_msg = (
+                nudge = (
                     "Output ONE tool call only. No reasoning, no explanation. Just:\n"
                     "<tool>tool_name</tool>\n"
                     "<args>{\"key\": \"value\"}</args>"
                 ) if no_tool_count >= 2 else "No response received. Please output a <tool> block."
-                messages.append({"role": "user", "content": nudge_msg})
+                messages.append({"role": "user", "content": nudge})
                 continue
 
-            # Strip think blocks for history but keep for parsing
             clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
             messages.append({"role": "assistant", "content": clean_response[:4000] or response[:300]})
 
-            # ΓöÇΓöÇ Parse tool call ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Parse tool call ───────────────────────────────────────────────
             tool_name, args = parse_tool_call(response)
 
             if not tool_name:
@@ -403,168 +352,275 @@ class ReActAgent:
                     })
                 continue
 
-            no_tool_count = 0  # Reset on valid tool call
+            no_tool_count = 0
 
-            # ΓöÇΓöÇ DONE signal ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── DONE signal ───────────────────────────────────────────────────
             if tool_name.upper() == "DONE":
-                if self.flag and not self._flag_seen_in_history(messages):
-                    logger.warning(f"[Agent] DONE called but flag not confirmed!")
+                cp = self.checkpoint
+                missing = []
+
+                # Check 1: flag must exist in workspace files
+                if self.flag and not self._flag_exists_in_workspace():
+                    missing.append(
+                        f"flag '{self.flag}' not found in any source file — "
+                        f"fix server.js/app.js to seed the flag, then redeploy"
+                    )
+
+                # Check 2: docker_logs must have been called after deployment
+                if not cp.logs_checked:
+                    missing.append(
+                        "docker_logs not called yet — "
+                        "call docker_logs to verify no errors before declaring done"
+                    )
+
+                # Check 3: http_request must have been called after deployment
+                if not cp.http_confirmed:
+                    missing.append(
+                        "http_request not called yet — "
+                        f"call http_request(url=\"http://localhost:{cp.port}/login\", method=\"POST\") "
+                        f"to confirm the endpoint responds"
+                    )
+
+                if missing:
+                    logger.warning(f"[Agent] DONE rejected — missing steps: {missing}")
+                    steps_text = "\n".join(f"  - {m}" for m in missing)
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"You declared DONE but the flag '{self.flag}' has not been "
-                            f"confirmed in any tool output. Run send_exploit against "
-                            f"http://localhost:{self.checkpoint.port} and verify the flag "
-                            f"appears before calling DONE."
+                            f"DONE rejected. Complete these missing steps first:\n{steps_text}"
                         ),
                     })
                     continue
 
-                logger.info(f"[Agent] Γ£à Lab complete after {iteration} iterations!")
+                logger.info(f"[Agent] ✅ Lab complete after {iteration} iterations!")
                 return {
-                    "status": "success",
-                    "lab_id": self.lab_id,
+                    "status":    "success",
+                    "lab_id":    self.lab_id,
                     "iterations": iteration,
-                    "summary": args.get("summary", "Lab generated successfully."),
+                    "summary":   args.get("summary", "Lab generated and deployed successfully."),
                 }
 
-            # ΓöÇΓöÇ Execute tool ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Order guard: docker_up requires docker_build first ───────────
+            if tool_name == "docker_up" and not self.checkpoint.docker_built:
+                logger.warning("[Agent] docker_up called before docker_build — redirecting")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "docker_up rejected: you must run docker_build first to catch "
+                        "build errors early.\n"
+                        "Call docker_build(context_path=\".\") now, then docker_up after it succeeds."
+                    ),
+                })
+                continue
+
+            # ── Execute tool ──────────────────────────────────────────────────
             logger.info(f"[Agent] Tool: {tool_name}({json.dumps(args)[:150]})")
             raw_output = execute_tool(tool_name, args, sandbox=self.sandbox)
-            output = truncate_output(tool_name, raw_output)
+            output     = truncate_output(tool_name, raw_output)
             logger.info(f"[Agent] Output ({len(output)} chars): {output[:300]}")
 
-            # ΓöÇΓöÇ Loop-breaker: detect repeated identical failures ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Loop-breaker: repeated identical failures ──────────────────────
             is_error = output.startswith("ERROR")
             if is_error and tool_name == last_tool_name and output[:120] == (last_tool_error or "")[:120]:
                 repeated_error_count += 1
                 if repeated_error_count >= 3:
-                    fn = TOOL_REGISTRY.get(tool_name)
+                    fn  = TOOL_REGISTRY.get(tool_name)
                     sig = str(inspect.signature(fn)) if fn else "(unknown)"
-                    correction = (
-                        f"You have called '{tool_name}' {repeated_error_count} times with the same error.\n"
-                        f"STOP guessing. The EXACT signature is: {tool_name}{sig}\n"
-                        f"Error was: {output[:200]}\n"
-                        f"Use a DIFFERENT tool or fix the root cause before retrying."
-                    )
-                    messages.append({"role": "user", "content": correction})
-                    repeated_error_count = 0  # Reset after intervention
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"You have called '{tool_name}' {repeated_error_count} times "
+                            f"with the same error.\nSTOP guessing. Exact signature: "
+                            f"{tool_name}{sig}\nError: {output[:200]}\n"
+                            f"Use a DIFFERENT approach or fix the root cause."
+                        ),
+                    })
+                    repeated_error_count = 0
             else:
                 if is_error:
-                    last_tool_error = output
+                    last_tool_error      = output
                     repeated_error_count = 1 if tool_name == last_tool_name else 0
                 else:
                     repeated_error_count = 0
-                    last_tool_error = None
+                    last_tool_error      = None
             last_tool_name = tool_name
 
-            # ΓöÇΓöÇ Fix D: Semantic loop detector ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Semantic loop detector ─────────────────────────────────────────
             tool_history.append(tool_name)
             if len(tool_history) > 16:
                 tool_history = tool_history[-16:]
 
             if len(tool_history) >= 8:
-                recent = tool_history[-8:]
-                writes = sum(1 for t in recent if t in ("write_file", "patch_file"))
+                recent  = tool_history[-8:]
+                writes  = sum(1 for t in recent if t in ("write_file", "patch_file"))
                 deploys = sum(1 for t in recent if t in ("docker_up", "docker_build"))
                 if writes >= 3 and deploys >= 3:
-                    logger.warning("[Agent] ΓÜá∩╕Å Rewrite-rebuild loop detected!")
+                    logger.warning("[Agent] ⚠️ Rewrite-rebuild loop detected!")
                     messages.append({
                         "role": "user",
                         "content": (
-                            "ΓÜá∩╕Å LOOP DETECTED: You have been alternating between rewriting files "
-                            "and running docker commands for several iterations. STOP rewriting files.\n"
-                            "Instead: 1) Run docker_down() first, 2) Then docker_up(compose_file=\".\"), "
-                            "3) If build fails, check the EXACT stacktrace/error and fix ONLY the broken file "
-                            "using patch_file(path, find, replace).\n"
-                            "Do NOT rewrite docker-compose.yml repeatedly ΓÇö the version format is NOT the problem."
+                            "⚠️ LOOP DETECTED: You are rewriting files that already built "
+                            "successfully. STOP writing files.\n"
+                            f"The image is already built. Call "
+                            f"wait_for_service(url=\"http://localhost:{self.checkpoint.port}\", timeout=30) "
+                            f"to confirm the running container is alive, then call DONE."
                         ),
                     })
                     tool_history.clear()
 
-            # ΓöÇΓöÇ Update checkpoint & phase ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Update checkpoint & phase ─────────────────────────────────────
             self._update_checkpoint(tool_name, args, output)
             self._detect_phase(tool_name, output)
 
-            # ΓöÇΓöÇ Feed observation back ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+            # ── Feed observation back ─────────────────────────────────────────
             messages.append({"role": "user", "content": f"[Observation]\n{output}"})
-            
-            if tool_name == "wait_for_service" and "TIMEOUT" in output:
-                # Find the actual container name instead of guessing
-                import subprocess
-                ps = subprocess.run(
-                    ["docker", "ps", "-a", "--filter", f"name={self.lab_id}", "--format", "{{.Names}}"],
-                    capture_output=True, text=True
-                )
-                container_name = ps.stdout.strip().split("\n")[0] if ps.stdout.strip() else f"{self.lab_id}-app-1"
+
+            # ── Post-tool guidance ────────────────────────────────────────────
+            if tool_name == "docker_up" and not output.lstrip().upper().startswith("ERROR"):
+                port = self.checkpoint.port
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"The service timed out ΓÇö the container is likely crashing at startup. "
-                        f"Call docker_logs NOW with container=\"{container_name}\" to see the crash reason. "
-                        f"Do NOT rewrite any files until you have read the logs."
+                        f"docker_up succeeded. "
+                        f"Now call wait_for_service(url=\"http://localhost:{port}\", timeout=30) "
+                        f"to confirm the container is accepting connections."
                     ),
                 })
 
-            # Max iterations reached
+            if tool_name == "wait_for_service":
+                if output.startswith("OK:"):
+                    # Service is up — guide agent through log check → http check → DONE
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "✅ Service is up! Complete these final steps before calling DONE:\n\n"
+                            "STEP 1: Call docker_logs to check for errors or serious warnings\n"
+                            "  - Errors found   → fix ONLY the broken file with patch_file, then redeploy\n"
+                            "  - Non-critical warnings (npm deprecation notices, etc.) → safe to ignore\n\n"
+                            f"STEP 2: Call http_request(url=\"http://localhost:{self.checkpoint.port}/login\", "
+                            f"method=\"POST\") to confirm the endpoint responds\n"
+                            "  - Any HTTP response (even 401 Unauthorized) confirms it's alive\n\n"
+                            "STEP 3: Call DONE"
+                        ),
+                    })
+                elif "TIMEOUT" in output:
+                    import subprocess as _sp
+                    ps = _sp.run(
+                        ["docker", "ps", "-a", "--filter", f"name={self.lab_id}",
+                         "--format", "{{.Names}}"],
+                        capture_output=True, text=True,
+                    )
+                    container_name = (
+                        ps.stdout.strip().split("\n")[0]
+                        if ps.stdout.strip()
+                        else f"{self.lab_id}-app-1"
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"The service timed out — container is likely crashing at startup. "
+                            f"Call docker_logs with container=\"{container_name}\" to see the "
+                            f"crash reason. Do NOT rewrite any files until you have read the logs."
+                        ),
+                    })
+
         logger.error(f"[Agent] Max iterations ({MAX_ITERATIONS}) reached.")
         return {
-            "status": "failed",
-            "lab_id": self.lab_id,
-            "iterations": MAX_ITERATIONS,
-            "reason": f"Max iterations ({MAX_ITERATIONS}) reached without completion.",
-            "phase": self.checkpoint.phase,
-            "deployed": self.checkpoint.deployed,
+            "status":       "failed",
+            "lab_id":       self.lab_id,
+            "iterations":   MAX_ITERATIONS,
+            "reason":       f"Max iterations ({MAX_ITERATIONS}) reached without completion.",
+            "phase":        self.checkpoint.phase,
+            "deployed":     self.checkpoint.deployed,
             "files_created": len(self.checkpoint.built),
         }
 
-    # ΓöÇΓöÇ Helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    # ── Helpers ──────────────────────────────────────────────────────────────────
 
-    def _flag_seen_in_history(self, messages: list) -> bool:
-        """Check if the flag appeared in any observation/tool output."""
-        for msg in messages:
-            content = msg.get("content", "")
-            if self.flag in content and msg.get("role") == "user" and "[Observation]" in content:
-                return True
-        return self.checkpoint.flag_found
+    def _flag_exists_in_workspace(self) -> bool:
+        """
+        Background check: does the flag value appear in any source file
+        in the workspace? No exploitation — just confirms it was embedded
+        correctly during the build phase.
+        """
+        source_extensions = {
+            ".js", ".py", ".sql", ".json", ".ts",
+            ".rb", ".go", ".php", ".env", ".txt",
+        }
+        try:
+            workspace = Path(self.workspace)
+            for f in workspace.rglob("*"):
+                if f.is_file() and f.suffix in source_extensions:
+                    try:
+                        content = f.read_text(encoding="utf-8", errors="ignore")
+                        if self.flag in content:
+                            return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return False
 
     def _update_checkpoint(self, tool_name: str, args: dict, output: str):
         """Update the milestone checkpoint from tool results."""
-        if tool_name in ("write_file", "patch_file"):
-            path = args.get("path", args.get("file_path", ""))
-            content = args.get("content", "")
-            if path:
-                self.checkpoint.record_file(path, content)
+        is_error = output.lstrip().upper().startswith("ERROR")
 
-        elif tool_name in ("docker_up", "docker_build"):
-            if "error" not in output.lower() or "running" in output.lower():
-                self.checkpoint.record_deployment(port=3000)
+        if tool_name in ("write_file", "patch_file"):
+            path    = args.get("path", args.get("file_path", ""))
+            content_val = args.get("content", "")
+            if path:
+                self.checkpoint.record_file(path, content_val)
+            # A successful patch resets docker_built so agent must rebuild
+            if tool_name == "patch_file" and not is_error:
+                self.checkpoint.docker_built = False
+                self.checkpoint.docker_upped = False
+                self.checkpoint.logs_checked = False
+                self.checkpoint.http_confirmed = False
+
+        elif tool_name == "docker_build":
+            if not is_error:
+                self.checkpoint.docker_built = True
+                logger.info("[Agent] ✅ docker_build succeeded")
+
+        elif tool_name == "docker_up":
+            if not is_error:
+                self.checkpoint.docker_upped = True
+                self.checkpoint.record_deployment(
+                    port=self.spec.get("assigned_port", 3000)
+                )
+                # Reset log/http flags so they are re-checked for this new deploy
+                self.checkpoint.logs_checked   = False
+                self.checkpoint.http_confirmed = False
 
         elif tool_name == "wait_for_service":
-            if "ready" in output.lower() or "200" in output or "success" in output.lower():
-                self.checkpoint.record_deployment(port=3000)
+            if output.startswith("OK:") or "ready" in output.lower() or "200" in output:
+                self.checkpoint.record_deployment(
+                    port=self.spec.get("assigned_port", 3000)
+                )
 
-        elif tool_name in ("verify_flag", "send_exploit", "http_request"):
-            if self.flag and self.flag in output:
-                self.checkpoint.flag_found = True
-                logger.info(f"[Agent] ≡ƒÅü FLAG CAPTURED in {tool_name} output!")
+        elif tool_name == "docker_logs":
+            # Mark logs as checked regardless of content — agent decides what to do
+            if self.checkpoint.deployed:
+                self.checkpoint.logs_checked = True
 
-        # Track errors for debugging context
-        if "error" in output.lower()[:100] and tool_name not in ("web_search",):
+        elif tool_name == "http_request":
+            # Any non-error HTTP response after deployment confirms the endpoint
+            if self.checkpoint.deployed and not is_error:
+                self.checkpoint.http_confirmed = True
+
+        if is_error and tool_name not in ("web_search",):
             self.checkpoint.record_error(f"{tool_name}: {output[:100]}")
 
     def _detect_phase(self, tool_name: str, output: str):
-        """Auto-detect current phase from tool usage."""
+        """Auto-detect current phase from tool usage (forward-only)."""
         detected = PHASE_TRANSITIONS.get(tool_name)
-        if detected:
-            current = self.checkpoint.phase
-            phase_order = [
-                AgentPhase.RESEARCH, AgentPhase.BUILD,
-                AgentPhase.DEPLOY, AgentPhase.EXPLOIT, AgentPhase.FINALIZE,
-            ]
-            # Only advance phases forward, never backward
-            if phase_order.index(detected) >= phase_order.index(current):
-                if detected != current:
-                    logger.info(f"[Agent] Phase auto-detected: {current} ΓåÆ {detected}")
-                self.checkpoint.phase = detected
+        if not detected:
+            return
 
+        current     = self.checkpoint.phase
+        phase_order = [AgentPhase.RESEARCH, AgentPhase.BUILD, AgentPhase.DEPLOY]
+
+        if phase_order.index(detected) >= phase_order.index(current):
+            if detected != current:
+                logger.info(f"[Agent] Phase auto-detected: {current} → {detected}")
+            self.checkpoint.phase = detected

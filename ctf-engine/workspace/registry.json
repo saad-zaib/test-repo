@@ -205,5 +205,28 @@
         "web_service": 3000
       }
     }
+  },
+  "lab_fdc581d2": {
+    "lab_id": "lab_fdc581d2",
+    "user_id": "anonymous",
+    "session_token": "0cf94920-73d1-4176-aafe-bfbf80cc1129",
+    "created_at": "2026-03-17T20:23:46.664285",
+    "expires_at": "2026-03-17T22:23:46.664285",
+    "service_urls": {
+      "app": "http://localhost:3000"
+    },
+    "par_time": 510.77,
+    "lab_dir": "workspace\\lab_fdc581d2",
+    "status": "active",
+    "challenge": {
+      "title": null,
+      "description": null,
+      "category": "web",
+      "difficulty": "easy",
+      "flag": "CTF{test}",
+      "ports": {
+        "web_service": 3000
+      }
+    }
   }
 }
