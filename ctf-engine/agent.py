@@ -21,14 +21,17 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
-
+from tools import (
+    execute_tool, truncate_output, get_tool_descriptions,
+    TOOL_REGISTRY, parse_all_tool_calls,
+)
 from config import LLM_MAX_TOKENS, MAX_AGENT_ITERATIONS
 from llm.client import call_llm
 from prompts import render_system_prompt
 from skills import load_skill
 from sandbox import DockerSandbox
 from tools import (
-    execute_tool, parse_tool_call, truncate_output, get_tool_descriptions,
+    execute_tool, truncate_output, get_tool_descriptions,
     TOOL_REGISTRY,
 )
 from tools.filesystem import set_workspace as fs_set_workspace
@@ -288,7 +291,6 @@ class ReActAgent:
         last_tool_error: str | None = None
         repeated_error_count = 0
 
-        tool_history: list[str] = []
 
         for iteration in range(1, MAX_ITERATIONS + 1):
             pct = (iteration / MAX_ITERATIONS) * 100
@@ -371,11 +373,10 @@ class ReActAgent:
             clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
             messages.append({"role": "assistant", "content": clean_response[:4000] or response[:300]})
 
-            # ── Parse tool call ───────────────────────────────────────────────
-            tool_name, args = parse_tool_call(response)
+# ── Parse ALL tool calls ──────────────────────────────────────────
+            tool_calls = parse_all_tool_calls(response)
 
-
-            if not tool_name:
+            if not tool_calls:
                 no_tool_count += 1
                 logger.warning(f"[Agent] No tool call in response (miss #{no_tool_count})")
                 if no_tool_count >= 3:
@@ -395,177 +396,155 @@ class ReActAgent:
                 continue
 
             no_tool_count = 0
-            logger.debug(f"[TOOL CALL] {tool_name}({json.dumps(args, indent=2)})")
 
-            # ── DONE signal ───────────────────────────────────────────────────
-            if tool_name.upper() == "DONE":
-                cp = self.checkpoint
-                missing = []
+            # ── Execute ALL tool calls in sequence ────────────────────────────
+            should_continue = False  # flag to skip to next iteration
+            for tool_name, args in tool_calls:
+                logger.debug(f"[TOOL CALL] {tool_name}({json.dumps(args, indent=2)})")
 
-                # Check 1: flag must exist in workspace files
-                if self.flag and not self._flag_exists_in_workspace():
-                    missing.append(
-                        f"flag '{self.flag}' not found in any source file — "
-                        f"fix server.js/app.js to seed the flag, then redeploy"
-                    )
+                # ── DONE signal ───────────────────────────────────────────────
+                if tool_name.upper() == "DONE":
+                    cp = self.checkpoint
+                    missing = []
+                    if self.flag and not self._flag_exists_in_workspace():
+                        missing.append(
+                            f"flag '{self.flag}' not found in any source file — "
+                            f"fix server.js/app.js to seed the flag, then redeploy"
+                        )
+                    if not cp.logs_checked:
+                        missing.append(
+                            "docker_logs not called yet — "
+                            "call docker_logs to verify no errors before declaring done"
+                        )
+                    if not cp.http_confirmed:
+                        missing.append(
+                            "http_request not called yet — "
+                            f"call http_request(url=\"http://localhost:{cp.port}/login\", method=\"POST\") "
+                            f"to confirm the endpoint responds"
+                        )
+                    if missing:
+                        logger.warning(f"[Agent] DONE rejected — missing steps: {missing}")
+                        steps_text = "\n".join(f"  - {m}" for m in missing)
+                        messages.append({
+                            "role": "user",
+                            "content": f"DONE rejected. Complete these missing steps first:\n{steps_text}",
+                        })
+                        should_continue = True
+                        break
 
-                # Check 2: docker_logs must have been called after deployment
-                if not cp.logs_checked:
-                    missing.append(
-                        "docker_logs not called yet — "
-                        "call docker_logs to verify no errors before declaring done"
-                    )
+                    logger.info(f"[Agent] ✅ Lab complete after {iteration} iterations!")
+                    return {
+                        "status":     "success",
+                        "lab_id":     self.lab_id,
+                        "iterations": iteration,
+                        "summary":    args.get("summary", "Lab generated and deployed successfully."),
+                    }
 
-                # Check 3: http_request must have been called after deployment
-                if not cp.http_confirmed:
-                    missing.append(
-                        "http_request not called yet — "
-                        f"call http_request(url=\"http://localhost:{cp.port}/login\", method=\"POST\") "
-                        f"to confirm the endpoint responds"
-                    )
-
-                if missing:
-                    logger.warning(f"[Agent] DONE rejected — missing steps: {missing}")
-                    steps_text = "\n".join(f"  - {m}" for m in missing)
+                # ── Order guard ───────────────────────────────────────────────
+                if tool_name == "docker_up" and not self.checkpoint.docker_built:
+                    logger.warning("[Agent] docker_up called before docker_build — redirecting")
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"DONE rejected. Complete these missing steps first:\n{steps_text}"
+                            "docker_up rejected: you must run docker_build first.\n"
+                            "Call docker_build(context_path=\".\") now, then docker_up after it succeeds."
                         ),
                     })
-                    continue
+                    should_continue = True
+                    break
 
-                logger.info(f"[Agent] ✅ Lab complete after {iteration} iterations!")
-                return {
-                    "status":    "success",
-                    "lab_id":    self.lab_id,
-                    "iterations": iteration,
-                    "summary":   args.get("summary", "Lab generated and deployed successfully."),
-                }
+                # ── Fix port in args before executing ─────────────────────────
+                assigned = self.spec.get("assigned_port", 3000)
+                if tool_name == "wait_for_service" and "url" in args:
+                    # Replace any port in the URL with the assigned port
+                    args["url"] = re.sub(r":\d+", f":{assigned}", args["url"])
+                if tool_name == "http_request" and "url" in args:
+                    args["url"] = re.sub(r":\d+", f":{assigned}", args["url"])
 
-            # ── Order guard: docker_up requires docker_build first ───────────
-            if tool_name == "docker_up" and not self.checkpoint.docker_built:
-                logger.warning("[Agent] docker_up called before docker_build — redirecting")
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "docker_up rejected: you must run docker_build first to catch "
-                        "build errors early.\n"
-                        "Call docker_build(context_path=\".\") now, then docker_up after it succeeds."
-                    ),
-                })
-                continue
+                # ── Execute tool ──────────────────────────────────────────────
+                logger.info(f"[Agent] Tool: {tool_name}({json.dumps(args)[:150]})")
+                raw_output = execute_tool(tool_name, args, sandbox=self.sandbox)
+                output     = truncate_output(tool_name, raw_output)
+                logger.debug(f"[TOOL RESULT] {tool_name} → {output[:500]}")
 
-            # ── Execute tool ──────────────────────────────────────────────────
-            logger.info(f"[Agent] Tool: {tool_name}({json.dumps(args)[:150]})")
-            raw_output = execute_tool(tool_name, args, sandbox=self.sandbox)
-            output     = truncate_output(tool_name, raw_output)
-            logger.debug(f"[TOOL RESULT] {tool_name} → {output[:500]}")
-
-            # ── Loop-breaker: repeated identical failures ──────────────────────
-            is_error = output.startswith("ERROR")
-            if is_error and tool_name == last_tool_name and output[:120] == (last_tool_error or "")[:120]:
-                repeated_error_count += 1
-                if repeated_error_count >= 3:
-                    fn  = TOOL_REGISTRY.get(tool_name)
-                    sig = str(inspect.signature(fn)) if fn else "(unknown)"
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"You have called '{tool_name}' {repeated_error_count} times "
-                            f"with the same error.\nSTOP guessing. Exact signature: "
-                            f"{tool_name}{sig}\nError: {output[:200]}\n"
-                            f"Use a DIFFERENT approach or fix the root cause."
-                        ),
-                    })
-                    repeated_error_count = 0
-            else:
-                if is_error:
-                    last_tool_error      = output
-                    repeated_error_count = 1 if tool_name == last_tool_name else 0
+                # ── Repeated error breaker ────────────────────────────────────
+                is_error = output.startswith("ERROR")
+                if is_error and tool_name == last_tool_name and output[:120] == (last_tool_error or "")[:120]:
+                    repeated_error_count += 1
+                    if repeated_error_count >= 3:
+                        fn  = TOOL_REGISTRY.get(tool_name)
+                        sig = str(inspect.signature(fn)) if fn else "(unknown)"
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                f"You have called '{tool_name}' {repeated_error_count} times "
+                                f"with the same error.\nSTOP. Exact signature: "
+                                f"{tool_name}{sig}\nError: {output[:200]}\n"
+                                f"Use a DIFFERENT approach."
+                            ),
+                        })
+                        repeated_error_count = 0
                 else:
-                    repeated_error_count = 0
-                    last_tool_error      = None
-            last_tool_name = tool_name
+                    if is_error:
+                        last_tool_error      = output
+                        repeated_error_count = 1 if tool_name == last_tool_name else 0
+                    else:
+                        repeated_error_count = 0
+                        last_tool_error      = None
+                last_tool_name = tool_name
 
-            # ── Semantic loop detector ─────────────────────────────────────────
-            tool_history.append(tool_name)
-            if len(tool_history) > 16:
-                tool_history = tool_history[-16:]
+                # ── Update checkpoint & phase ─────────────────────────────────
+                self._update_checkpoint(tool_name, args, output)
+                self._detect_phase(tool_name, output)
 
-            if len(tool_history) >= 8:
-                recent  = tool_history[-8:]
-                writes  = sum(1 for t in recent if t in ("write_file", "patch_file"))
-                deploys = sum(1 for t in recent if t in ("docker_up", "docker_build"))
-                if writes >= 3 and deploys >= 3:
-                    logger.warning("[Agent] ⚠️ Rewrite-rebuild loop detected!")
+                # ── Feed observation back ─────────────────────────────────────
+                messages.append({"role": "user", "content": f"[Observation]\n{output}"})
+
+                # ── Post-tool guidance ────────────────────────────────────────
+                if tool_name == "docker_up" and not output.lstrip().upper().startswith("ERROR"):
                     messages.append({
                         "role": "user",
                         "content": (
-                            "⚠️ LOOP DETECTED: You are rewriting files that already built "
-                            "successfully. STOP writing files.\n"
-                            f"The image is already built. Call "
-                            f"wait_for_service(url=\"http://localhost:{self.checkpoint.port}\", timeout=30) "
-                            f"to confirm the running container is alive, then call DONE."
+                            f"docker_up succeeded. "
+                            f"Now call wait_for_service(url=\"http://localhost:{assigned}\", timeout=30)."
                         ),
                     })
-                    tool_history.clear()
 
-            # ── Update checkpoint & phase ─────────────────────────────────────
-            self._update_checkpoint(tool_name, args, output)
-            self._detect_phase(tool_name, output)
+                if tool_name == "wait_for_service":
+                    if output.startswith("OK:"):
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "✅ Service is up! Complete these final steps:\n\n"
+                                f"STEP 1: docker_logs(container='<name>', tail=50)\n"
+                                f"STEP 2: http_request(url=\"http://localhost:{assigned}/login\", method=\"POST\")\n"
+                                "STEP 3: DONE"
+                            ),
+                        })
+                    elif "TIMEOUT" in output:
+                        import subprocess as _sp
+                        ps = _sp.run(
+                            ["docker", "ps", "-a", "--filter", f"name={self.lab_id}",
+                             "--format", "{{.Names}}"],
+                            capture_output=True, text=True,
+                        )
+                        container_name = (
+                            ps.stdout.strip().split("\n")[0]
+                            if ps.stdout.strip() else f"{self.lab_id}-app-1"
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                f"Service timed out — container likely crashing. "
+                                f"Call docker_logs(container=\"{container_name}\") to see the crash reason. "
+                                f"Do NOT rewrite files until you read the logs."
+                            ),
+                        })
 
-            # ── Feed observation back ─────────────────────────────────────────
-            messages.append({"role": "user", "content": f"[Observation]\n{output}"})
-
-            # ── Post-tool guidance ────────────────────────────────────────────
-            if tool_name == "docker_up" and not output.lstrip().upper().startswith("ERROR"):
-                port = self.checkpoint.port
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"docker_up succeeded. "
-                        f"Now call wait_for_service(url=\"http://localhost:{port}\", timeout=30) "
-                        f"to confirm the container is accepting connections."
-                    ),
-                })
-
-            if tool_name == "wait_for_service":
-                if output.startswith("OK:"):
-                    # Service is up — guide agent through log check → http check → DONE
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "✅ Service is up! Complete these final steps before calling DONE:\n\n"
-                            "STEP 1: Call docker_logs to check for errors or serious warnings\n"
-                            "  - Errors found   → fix ONLY the broken file with patch_file, then redeploy\n"
-                            "  - Non-critical warnings (npm deprecation notices, etc.) → safe to ignore\n\n"
-                            f"STEP 2: Call http_request(url=\"http://localhost:{self.checkpoint.port}/login\", "
-                            f"method=\"POST\") to confirm the endpoint responds\n"
-                            "  - Any HTTP response (even 401 Unauthorized) confirms it's alive\n\n"
-                            "STEP 3: Call DONE"
-                        ),
-                    })
-                elif "TIMEOUT" in output:
-                    import subprocess as _sp
-                    ps = _sp.run(
-                        ["docker", "ps", "-a", "--filter", f"name={self.lab_id}",
-                         "--format", "{{.Names}}"],
-                        capture_output=True, text=True,
-                    )
-                    container_name = (
-                        ps.stdout.strip().split("\n")[0]
-                        if ps.stdout.strip()
-                        else f"{self.lab_id}-app-1"
-                    )
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"The service timed out — container is likely crashing at startup. "
-                            f"Call docker_logs with container=\"{container_name}\" to see the "
-                            f"crash reason. Do NOT rewrite any files until you have read the logs."
-                        ),
-                    })
+                # Stop executing remaining tools if this one errored
+                if is_error:
+                    logger.warning(f"[Agent] Tool {tool_name} errored — stopping batch, waiting for LLM decision")
+                    break
 
         logger.error(f"[Agent] Max iterations ({MAX_ITERATIONS}) reached.")
         return {

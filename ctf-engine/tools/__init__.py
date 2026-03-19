@@ -1,9 +1,5 @@
 """
 tools/__init__.py — Central tool registry and dispatcher.
-
-Exploit-phase tools (send_exploit, verify_flag, decode_jwt, forge_jwt,
-save_exploit_script, run_strix_exploit) have been removed.
-The agent now stops at DEPLOY — no exploitation phase.
 """
 
 import inspect
@@ -415,6 +411,30 @@ def parse_tool_call(text: str) -> tuple[str | None, dict]:
 
     return tool_name, args
 
+def parse_all_tool_calls(text: str) -> list[tuple[str, dict]]:
+    """Extract ALL tool calls from a response that contains multiple <tool> blocks."""
+    results = []
+    # Find all <tool>...</tool> + <args>...</args> pairs
+    pattern = re.finditer(
+        r"<tool>\s*(.*?)\s*</tool>\s*<args>\s*(.*?)\s*</args>",
+        text, re.DOTALL | re.IGNORECASE
+    )
+    for match in pattern:
+        tool_name = match.group(1).strip()
+        raw_args  = match.group(2).strip()
+        tool_name = {  # aliases
+            "create_file": "write_file", "file_write": "write_file",
+        }.get(tool_name, tool_name)
+        try:
+            args = json.loads(raw_args) if raw_args.startswith("{") else {}
+        except json.JSONDecodeError:
+            try:
+                args = json.loads(_repair_json(raw_args))
+            except json.JSONDecodeError:
+                args = {}
+        if tool_name:
+            results.append((tool_name, args))
+    return results
 
 def execute_tool(tool_name: str, args: dict, sandbox=None) -> str:
     """Look up and call a tool by name."""

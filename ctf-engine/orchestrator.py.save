@@ -3,8 +3,8 @@ orchestrator.py
 
 The Orchestrator manages the full generation pipeline:
 1. Spin up sandbox
-2. Run ReAct agent (multi-phase: research → build → deploy → exploit)
-4. Register the lab
+2. Run ReAct agent (multi-phase: research → build → deploy)
+3. Register the lab
 """
 
 import uuid
@@ -17,7 +17,6 @@ from config import MAX_RETRIES, WORKSPACE_DIR
 from tools.register_lab import RegisterLabTool
 from sandbox import DockerSandbox
 from agent import ReActAgent
-
 
 logger = logging.getLogger(__name__)
 

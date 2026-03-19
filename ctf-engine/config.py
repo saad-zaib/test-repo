@@ -60,10 +60,3 @@ MAX_STEPS_PER_PHASE  = int(os.getenv("MAX_STEPS_PER_PHASE", "15"))
 # SEARCH (Tavily)
 # ─────────────────────────────────────────────
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
-
-# ─────────────────────────────────────────────
-# STRIX VALIDATION (optional)
-# ─────────────────────────────────────────────
-STRIX_ENABLED        = os.getenv("STRIX_ENABLED", "false").lower() == "true"
-STRIX_LLM            = os.getenv("STRIX_LLM", LLM_MODEL)
-STRIX_MAX_ITERATIONS = int(os.getenv("STRIX_MAX_ITERATIONS", "50"))
