@@ -14,7 +14,7 @@ import re
 import sys
 import time
 from typing import Optional
-
+import os
 import httpx
 
 from config import (
@@ -148,7 +148,7 @@ def _call_ollama(
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
-            "think": False,
+            "num_ctx": int(os.getenv("NUM_CTX", "32768")),
         },
     }
 

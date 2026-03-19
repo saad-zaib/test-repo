@@ -41,11 +41,11 @@ logger = logging.getLogger(__name__)
 # ── Configuration ───────────────────────────────────────────────────────────────
 
 MAX_ITERATIONS = MAX_AGENT_ITERATIONS   # 50
-HISTORY_WINDOW = 12
+HISTORY_WINDOW = 30
 HISTORY_PIN    = 3
 WARN_AT_80_PCT = True
 WARN_AT_97_PCT = True
-
+RECENT_FULL       = 6
 
 # ── Agent Phase Tracking ────────────────────────────────────────────────────────
 
@@ -137,23 +137,53 @@ class Checkpoint:
 
 # ── Context Window Management ───────────────────────────────────────────────────
 
+def _compress_message(msg: dict) -> dict:
+    content = msg.get("content", "")
+    if not isinstance(content, str) or len(content) <= 600:
+        return msg
+
+    tool_match = re.search(r"Tool:\s*(\w+)", content)
+    tool_name  = tool_match.group(1) if tool_match else "tool"
+
+    status_match = re.search(r"(OK|FAILED|ERROR|SUCCESS|TIMEOUT)[^\n]*", content, re.IGNORECASE)
+    status       = status_match.group(0).strip() if status_match else "unknown"
+
+    lines  = [l.strip() for l in content.splitlines() if l.strip()]
+    detail = ""
+    for line in lines:
+        if line not in (tool_name, status) and len(line) > 10:
+            detail = line[:120]
+            break
+
+    summary = f"[{tool_name}] {status}"
+    if detail:
+        summary += f" | {detail}"
+
+    return {**msg, "content": summary}
+
 def manage_context(messages: list, checkpoint: Checkpoint) -> list:
+    # Always refresh pinned summary + phase goal
+    if len(messages) > 1:
+        messages[1] = {"role": "user", "content": checkpoint.to_summary()}
+    if len(messages) > 2:
+        messages[2] = {"role": "user", "content": PHASE_GOALS[checkpoint.phase]}
+
     if len(messages) <= HISTORY_PIN + HISTORY_WINDOW:
-        if len(messages) > 1:
-            messages[1] = {"role": "user", "content": checkpoint.to_summary()}
-        if len(messages) > 2:
-            messages[2] = {"role": "user", "content": PHASE_GOALS[checkpoint.phase]}
         return messages
 
     pinned  = messages[:HISTORY_PIN]
     rolling = messages[HISTORY_PIN:]
     recent  = rolling[-HISTORY_WINDOW:]
 
+    # Keep last RECENT_FULL messages untouched, compress everything older
+    if len(recent) > RECENT_FULL:
+        old    = [_compress_message(m) for m in recent[:-RECENT_FULL]]
+        recent = old + recent[-RECENT_FULL:]
+
     pinned[1] = {"role": "user", "content": checkpoint.to_summary()}
     pinned[2] = {"role": "user", "content": PHASE_GOALS[checkpoint.phase]}
 
     return pinned + recent
-
 
 def compact_for_phase(
     system_prompt: str,
@@ -298,6 +328,16 @@ class ReActAgent:
             # ── Context management ────────────────────────────────────────────
             messages = manage_context(messages, self.checkpoint)
 
+            # ── LLM input debug ──────────────────────────────────────────────
+            logger.debug(f"\n{'='*60}")
+            logger.debug(f"[LLM INPUT] Iteration {iteration} — {len(messages)} messages")
+            for i, m in enumerate(messages):
+                preview = m.get("content", "")
+                if len(preview) > 300:
+                    preview = preview[:300] + "...[truncated]"
+                logger.debug(f"  [{i}] {m['role'].upper()}: {preview}")
+            logger.debug(f"{'='*60}")
+
             # ── LLM call ─────────────────────────────────────────────────────
             try:
                 response = call_llm(
@@ -307,6 +347,7 @@ class ReActAgent:
                     max_tokens=LLM_MAX_TOKENS,
                     conversation=messages,
                 )
+                logger.debug(f"[LLM OUTPUT] Iteration {iteration}:\n{response}")
             except Exception as e:
                 logger.error(f"[Agent] LLM call failed: {e}")
                 self.checkpoint.record_error(f"LLM error: {e}")
@@ -333,6 +374,7 @@ class ReActAgent:
             # ── Parse tool call ───────────────────────────────────────────────
             tool_name, args = parse_tool_call(response)
 
+
             if not tool_name:
                 no_tool_count += 1
                 logger.warning(f"[Agent] No tool call in response (miss #{no_tool_count})")
@@ -353,6 +395,7 @@ class ReActAgent:
                 continue
 
             no_tool_count = 0
+            logger.debug(f"[TOOL CALL] {tool_name}({json.dumps(args, indent=2)})")
 
             # ── DONE signal ───────────────────────────────────────────────────
             if tool_name.upper() == "DONE":
@@ -417,7 +460,7 @@ class ReActAgent:
             logger.info(f"[Agent] Tool: {tool_name}({json.dumps(args)[:150]})")
             raw_output = execute_tool(tool_name, args, sandbox=self.sandbox)
             output     = truncate_output(tool_name, raw_output)
-            logger.info(f"[Agent] Output ({len(output)} chars): {output[:300]}")
+            logger.debug(f"[TOOL RESULT] {tool_name} → {output[:500]}")
 
             # ── Loop-breaker: repeated identical failures ──────────────────────
             is_error = output.startswith("ERROR")
