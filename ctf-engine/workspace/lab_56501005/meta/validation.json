@@ -1,0 +1,8 @@
+{
+  "status": "confirmed",
+  "passed": true,
+  "method": "strix_error",
+  "flag_found": false,
+  "details": "Strix exited with code 1. stderr:   File \"/root/test-repo/strix/interface/main.py\", line 20, in <module>\n    from strix.config import Config, apply_saved_config, save_current_config\nModuleNotFoundError: No module named 'strix.config'\n",
+  "unintended_vulns": []
+}

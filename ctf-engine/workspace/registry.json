@@ -343,5 +343,51 @@
         "web_service": 3000
       }
     }
+  },
+  "lab_c8e6b75b": {
+    "lab_id": "lab_c8e6b75b",
+    "user_id": "anonymous",
+    "session_token": "84d5fa50-e77e-4ffc-a03d-2d8a987de59d",
+    "created_at": "2026-03-19T16:50:24.358476",
+    "expires_at": "2026-03-19T18:50:24.358463",
+    "service_urls": {
+      "app": "http://localhost:3000"
+    },
+    "par_time": 357.42,
+    "lab_dir": "workspace/lab_c8e6b75b",
+    "status": "active",
+    "challenge": {
+      "title": null,
+      "description": null,
+      "category": "web",
+      "difficulty": "easy",
+      "flag": "CTF{test}",
+      "ports": {
+        "web_service": 3000
+      }
+    }
+  },
+  "lab_56501005": {
+    "lab_id": "lab_56501005",
+    "user_id": "anonymous",
+    "session_token": "f16ab713-dcef-4a43-9752-d4b76aed8f09",
+    "created_at": "2026-03-20T03:56:12.872798",
+    "expires_at": "2026-03-20T05:56:12.872786",
+    "service_urls": {
+      "app": "http://localhost:3000"
+    },
+    "par_time": 196.76,
+    "lab_dir": "workspace/lab_56501005",
+    "status": "active",
+    "challenge": {
+      "title": null,
+      "description": null,
+      "category": "web",
+      "difficulty": "easy",
+      "flag": "CTF{test}",
+      "ports": {
+        "web_service": 3000
+      }
+    }
   }
 }

@@ -3,7 +3,8 @@ orchestrator.py
 
 The Orchestrator manages the full generation pipeline:
 1. Spin up sandbox
-2. Run ReAct agent (multi-phase: research → build → deploy → exploit)
+2. Run ReAct agent (multi-phase: research → build → deploy)
+3. Validate with Strix (white-box quick scan)
 4. Register the lab
 """
 
@@ -13,10 +14,14 @@ import json
 import time
 from pathlib import Path
 
-from config import MAX_RETRIES, WORKSPACE_DIR
+from config import (
+    MAX_RETRIES, WORKSPACE_DIR,
+    STRIX_ENABLED, STRIX_TIMEOUT,
+)
 from tools.register_lab import RegisterLabTool
 from sandbox import DockerSandbox
 from agent import ReActAgent
+from validators.strix_validator import StrixValidator
 
 
 logger = logging.getLogger(__name__)
@@ -26,11 +31,12 @@ class Orchestrator:
 
     def __init__(self):
         self.register_tool = RegisterLabTool()
+        self.strix_validator = StrixValidator()
 
     def generate_lab(self, spec: dict, user_id: str = "anonymous") -> dict:
         """
         Main entry point. Receives spec from frontend.
-        Spins up sandbox, runs agent, validates, registers.
+        Spins up sandbox, runs agent, validates with Strix, registers.
         """
         if "lab_id" not in spec:
             spec["lab_id"] = f"lab_{uuid.uuid4().hex[:8]}"
@@ -82,6 +88,47 @@ class Orchestrator:
             }
             (meta_dir / "challenge.json").write_text(json.dumps(challenge_data, indent=2))
 
+            # ── 4. Strix Validation (white-box quick scan) ──────────────
+            validation_result = None
+            validation_status = "skipped"
+
+            if STRIX_ENABLED:
+                logger.info("[Orchestrator] 🔍 Running Strix white-box validation...")
+                try:
+                    target_url = f"http://localhost:{assigned_port}"
+                    validation_result = self.strix_validator.validate(
+                        lab_dir=workspace_path,
+                        target_url=target_url,
+                        vuln_type=spec.get("vuln_type", "unknown"),
+                        expected_flag=spec.get("flag", ""),
+                    )
+                    validation_status = "confirmed" if validation_result.passed else "failed"
+                    logger.info(
+                        f"[Orchestrator] Strix validation: {validation_status} "
+                        f"(method={validation_result.method}, flag_found={validation_result.flag_found})"
+                    )
+                    if validation_result.details:
+                        logger.info(f"[Orchestrator] Strix details: {validation_result.details}")
+
+                    # Save validation report
+                    validation_report = {
+                        "status": validation_status,
+                        "passed": validation_result.passed,
+                        "method": validation_result.method,
+                        "flag_found": validation_result.flag_found,
+                        "details": validation_result.details,
+                        "unintended_vulns": validation_result.unintended_vulns,
+                    }
+                    (meta_dir / "validation.json").write_text(
+                        json.dumps(validation_report, indent=2)
+                    )
+
+                except Exception as e:
+                    logger.warning(f"[Orchestrator] Strix validation error (non-blocking): {e}")
+                    validation_status = "error"
+            else:
+                logger.info("[Orchestrator] Strix validation disabled — skipping")
+
             par_time = round(time.time() - start_time, 2)
             service_urls = {"app": f"http://localhost:{assigned_port}"}
 
@@ -115,9 +162,14 @@ class Orchestrator:
                 "expires_at": reg_result.get("expires_at"),
                 "challenge_title": reg_result.get("challenge_title"),
                 "challenge_description": reg_result.get("challenge_description"),
+                "validation": validation_status,
+                "validation_details": (
+                    validation_result.details if validation_result else "Validation skipped"
+                ),
                 "message": (
                     f"Lab ready! Target: {service_urls.get('app')} | "
-                    f"Time: {par_time}s | Iterations: {result.get('iterations', '?')}"
+                    f"Time: {par_time}s | Iterations: {result.get('iterations', '?')} | "
+                    f"Validation: {validation_status}"
                 ),
             }
 

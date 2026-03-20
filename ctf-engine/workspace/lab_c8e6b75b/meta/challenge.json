@@ -1,0 +1,11 @@
+{
+  "title": null,
+  "description": null,
+  "category": "web",
+  "difficulty": "easy",
+  "flag": "CTF{test}",
+  "vuln_type": "cmdi",
+  "ports": {
+    "web_service": 3000
+  }
+}
